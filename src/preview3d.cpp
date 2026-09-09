@@ -23,6 +23,8 @@ struct Vertex {
     float u, v;
 };
 
+constexpr UINT kVertexStride = 32;
+
 struct Mat4 {
     float m[16]{};
 };
@@ -44,7 +46,7 @@ IDirect3D9* g_d3d = nullptr;
 IDirect3DDevice9* g_dev = nullptr;
 D3DPRESENT_PARAMETERS g_pp{};
 bool g_active = false;
-bool g_showSkel = true;
+bool g_showSkel = false;
 bool g_drag = false;
 POINT g_last{};
 float g_yaw = 0.35f;
@@ -253,7 +255,7 @@ void SetupStates() {
     g_dev->SetRenderState(D3DRS_LIGHTING, TRUE);
     g_dev->SetRenderState(D3DRS_NORMALIZENORMALS, TRUE);
     g_dev->SetRenderState(D3DRS_SPECULARENABLE, FALSE);
-    g_dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
+    g_dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
     g_dev->SetRenderState(D3DRS_AMBIENT, D3DCOLOR_XRGB(70, 70, 78));
     g_dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
     g_dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
@@ -304,7 +306,8 @@ bool CreateDevice() {
 }
 
 bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* mat) {
-    if (!g_dev || src.pos.empty() || src.idx.empty()) return false;
+    if (!g_dev || src.pos.empty() || src.idx.size() < 9) return false;
+    if (src.name.find("decal") != std::string::npos) return false;
     DrawMesh d;
     d.nidx = (unsigned)src.idx.size();
     d.nverts = (unsigned)src.pos.size();
@@ -315,7 +318,7 @@ bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* m
         d.additive = mat->blend == "add";
         d.translucent = mat->blend == "translucent";
     }
-    const UINT vbytes = (UINT)(src.pos.size() * sizeof(Vertex));
+    const UINT vbytes = (UINT)(src.pos.size() * kVertexStride);
     if (FAILED(g_dev->CreateVertexBuffer(vbytes, 0, g_fvf, D3DPOOL_MANAGED, &d.vb, nullptr)))
         return false;
     void* vp = nullptr;
@@ -323,31 +326,33 @@ bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* m
         d.vb->Release();
         return false;
     }
-    auto* v = (Vertex*)vp;
+    auto* base = (uint8_t*)vp;
     for (size_t i = 0; i < src.pos.size(); ++i) {
-        v[i].x = src.pos[i].x;
-        v[i].y = src.pos[i].y;
-        v[i].z = src.pos[i].z;
+        auto* v = (Vertex*)(base + i * kVertexStride);
+        v->x = src.pos[i].x;
+        v->y = src.pos[i].y;
+        v->z = src.pos[i].z;
         if (i < src.nrm.size()) {
-            v[i].nx = src.nrm[i].x;
-            v[i].ny = src.nrm[i].y;
-            v[i].nz = src.nrm[i].z;
+            v->nx = src.nrm[i].x;
+            v->ny = src.nrm[i].y;
+            v->nz = src.nrm[i].z;
         } else {
-            v[i].nx = 0;
-            v[i].ny = 1;
-            v[i].nz = 0;
+            v->nx = 0;
+            v->ny = 1;
+            v->nz = 0;
         }
         if (i < src.uv.size()) {
-            v[i].u = src.uv[i].u;
-            v[i].v = src.uv[i].v;
+            v->u = src.uv[i].u;
+            v->v = src.uv[i].v;
         } else {
-            v[i].u = 0;
-            v[i].v = 0;
+            v->u = 0;
+            v->v = 0;
         }
+        memset((uint8_t*)v + sizeof(Vertex), 0, kVertexStride - sizeof(Vertex));
     }
     d.vb->Unlock();
-    const UINT ibytes = (UINT)(src.idx.size() * sizeof(uint32_t));
-    if (FAILED(g_dev->CreateIndexBuffer(ibytes, 0, D3DFMT_INDEX32, D3DPOOL_MANAGED, &d.ib, nullptr))) {
+    const UINT ibytes = (UINT)(src.idx.size() * sizeof(uint16_t));
+    if (FAILED(g_dev->CreateIndexBuffer(ibytes, 0, D3DFMT_INDEX16, D3DPOOL_MANAGED, &d.ib, nullptr))) {
         d.vb->Release();
         return false;
     }
@@ -357,7 +362,9 @@ bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* m
         d.ib->Release();
         return false;
     }
-    memcpy(ip, src.idx.data(), ibytes);
+    auto* dstIdx = (uint16_t*)ip;
+    for (size_t i = 0; i < src.idx.size(); ++i)
+        dstIdx[i] = (uint16_t)src.idx[i];
     d.ib->Unlock();
     g_triCount += d.nidx / 3;
     g_draws.push_back(d);
@@ -412,9 +419,10 @@ void FitCamera(const DxgModel& model) {
     const float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
     g_radius = sqrtf(dx * dx + dy * dy + dz * dz) * 0.5f;
     if (g_radius < 8.0f) g_radius = 8.0f;
-    g_dist = g_radius * 2.4f;
-    g_yaw = 0.55f;
-    g_pitch = 0.18f;
+    const float tall = (std::max)(dy, (std::max)(dx, dz));
+    g_dist = (std::max)(g_radius * 2.05f, tall * 1.35f);
+    g_yaw = 0.70f;
+    g_pitch = 0.12f;
 }
 
 }  // namespace
@@ -460,11 +468,54 @@ bool Preview3D_Load(const Preview3DInput& in) {
         if (!fallback) fallback = tex;
     }
 
-    FitCamera(model);
+    auto meshBox = [](const DxgMesh& mesh, float mn[3], float mx[3]) {
+        mn[0] = mn[1] = mn[2] = 1.0e9f;
+        mx[0] = mx[1] = mx[2] = -1.0e9f;
+        for (const auto& p : mesh.pos) {
+            if (p.x < mn[0]) mn[0] = p.x;
+            if (p.y < mn[1]) mn[1] = p.y;
+            if (p.z < mn[2]) mn[2] = p.z;
+            if (p.x > mx[0]) mx[0] = p.x;
+            if (p.y > mx[1]) mx[1] = p.y;
+            if (p.z > mx[2]) mx[2] = p.z;
+        }
+    };
+    auto volOf = [](const float mn[3], const float mx[3]) {
+        const float a = (std::max)(1.0f, mx[0] - mn[0]);
+        const float b = (std::max)(1.0f, mx[1] - mn[1]);
+        const float c = (std::max)(1.0f, mx[2] - mn[2]);
+        return a * b * c;
+    };
+    int mainI = -1;
+    float bestVol = -1.0f;
+    for (int i = 0; i < (int)model.meshes.size(); ++i) {
+        const auto& mesh = model.meshes[(size_t)i];
+        if (mesh.lod1 || mesh.pos.empty()) continue;
+        float mn[3], mx[3];
+        meshBox(mesh, mn, mx);
+        float v = volOf(mn, mx);
+        if (mesh.name.find("GND_00") != std::string::npos) v *= 8.0f;
+        if (v > bestVol) {
+            bestVol = v;
+            mainI = i;
+        }
+    }
+    // Attachment parts (Hand_*, Saber_*, etc.) are parented to bones at runtime.
+    // Draw only the main skinned body shell until bone attachment is implemented.
+    DxgModel draw = model;
+    draw.meshes.clear();
+    for (int i = 0; i < (int)model.meshes.size(); ++i) {
+        const auto& mesh = model.meshes[(size_t)i];
+        if (mesh.lod1) continue;
+        if (mainI >= 0 && i != mainI) continue;
+        draw.meshes.push_back(mesh);
+    }
+    if (draw.meshes.empty()) draw.meshes = model.meshes;
+
+    FitCamera(draw);
     g_meshCount = 0;
     g_triCount = 0;
-    for (const auto& mesh : model.meshes) {
-        if (mesh.lod1) continue;
+    for (const auto& mesh : draw.meshes) {
         const int mid = vra.MaterialOf(mesh.name);
         const VraMaterial* mat = vra.GetMat(mid);
         IDirect3DTexture9* tex = fallback;
@@ -510,6 +561,14 @@ void Preview3D_Render() {
     SetupStates();
     g_dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(18, 20, 26), 1.0f, 0);
     if (FAILED(g_dev->BeginScene())) return;
+    D3DVIEWPORT9 vp{};
+    vp.X = 0;
+    vp.Y = 0;
+    vp.Width = (DWORD)cw;
+    vp.Height = (DWORD)ch;
+    vp.MinZ = 0.0f;
+    vp.MaxZ = 1.0f;
+    g_dev->SetViewport(&vp);
 
     if (g_pitch < -1.2f) g_pitch = -1.2f;
     if (g_pitch > 1.2f) g_pitch = 1.2f;
@@ -521,7 +580,7 @@ void Preview3D_Render() {
 
     Mat4 view, proj;
     LookAt(ex, ey, ez, g_cx, g_cy, g_cz, view);
-    Perspective(3.14159265f / 4.5f, (float)cw / (float)ch, (std::max)(1.0f, g_radius * 0.02f),
+    Perspective(3.14159265f / 4.5f, (float)cw / (float)((std::max)(64, ch)), (std::max)(1.0f, g_radius * 0.02f),
                 g_dist + g_radius * 8.0f, proj);
     g_dev->SetTransform(D3DTS_VIEW, (D3DMATRIX*)view.m);
     g_dev->SetTransform(D3DTS_PROJECTION, (D3DMATRIX*)proj.m);
@@ -533,7 +592,7 @@ void Preview3D_Render() {
         if (!d.vb || !d.ib || d.nidx < 3) return;
         const bool isT = d.translucent || d.additive;
         if (isT != transparent) return;
-        g_dev->SetStreamSource(0, d.vb, 0, sizeof(Vertex));
+        g_dev->SetStreamSource(0, d.vb, 0, kVertexStride);
         g_dev->SetIndices(d.ib);
         g_dev->SetTexture(0, d.tex);
         g_dev->SetRenderState(D3DRS_CULLMODE, d.twoSided ? D3DCULL_NONE : D3DCULL_CCW);
