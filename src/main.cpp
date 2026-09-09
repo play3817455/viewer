@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <uxtheme.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 
@@ -16,6 +17,8 @@
 
 #include "fpmf.h"
 #include "image_io.h"
+#include "preview3d.h"
+#include "vra_text.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -23,6 +26,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "msimg32.lib")
+#pragma comment(lib, "uxtheme.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -40,6 +44,7 @@ enum {
     ID_BTN_DIR = 1010,
     ID_LBL_DIR = 1011,
     ID_CHK_STRUCT = 1012,
+    ID_PROGRESS = 1013,
     ID_OPEN = 4001,
     ID_EXTRACT = 4002,
     ID_EXTRACT_ALL = 4003,
@@ -57,12 +62,15 @@ enum {
     ID_CTX_TREE_ALL = 4110,
     ID_CTX_TREE_VISIBLE = 4111,
     ID_CTX_TREE_PNG = 4112,
+    ID_D3DPREV = 1014,
     IDT_FILTER = 1,
+    IDT_PREV3D = 2,
     WM_APP_LOAD_DONE = WM_APP + 20,
+    WM_APP_PROGRESS = WM_APP + 21,
 };
 
 static HWND g_tree, g_list, g_preview, g_status, g_main, g_prevFrame;
-static HWND g_filter, g_search, g_img, g_lblFilter, g_lblSearch, g_btnDir, g_lblDir, g_chkStruct;
+static HWND g_filter, g_search, g_img, g_d3dView, g_lblFilter, g_lblSearch, g_btnDir, g_lblDir, g_chkStruct, g_progress;
 static void LayoutPreview();
 static void ShowPreviewFrame(bool show);
 static void ShowPreview(int arch, int fileIndex);
@@ -84,6 +92,7 @@ struct VfsNode {
 static std::vector<VfsNode> g_vfs;
 static std::vector<unsigned> g_vfsMatch;
 static std::map<std::wstring, std::vector<std::pair<int, int>>> g_unitIndex;
+static std::map<std::wstring, std::pair<int, int>> g_pathIndex;
 static ImageRgba g_imgData;
 static HBITMAP g_bmp = nullptr;
 static std::filesystem::path g_extractDir;
@@ -94,6 +103,7 @@ static int g_imgMean = -1;
 static bool g_exportStruct = true;
 static std::atomic<unsigned> g_loadSeq{0};
 static std::atomic<bool> g_loading{false};
+static std::atomic<bool> g_exporting{false};
 
 static std::wstring Widen(const std::string& s) {
     if (s.empty()) return {};
@@ -101,6 +111,14 @@ static std::wstring Widen(const std::string& s) {
     std::wstring w(n - 1, 0);
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
     return w;
+}
+
+static std::string Narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(n > 0 ? n - 1 : 0, 0);
+    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr, nullptr);
+    return s;
 }
 
 static std::wstring ToLower(std::wstring s) {
@@ -146,6 +164,117 @@ static void SaveConfig() {
 }
 
 static void SetStatus(const wchar_t* s) { SendMessageW(g_status, SB_SETTEXT, 0, (LPARAM)s); }
+
+struct ProgInfo {
+    unsigned seq = 0;
+    unsigned done = 0;
+    unsigned total = 0;
+    wchar_t text[200]{};
+};
+
+static void PlaceProgressBar() {
+    if (!g_main || !g_progress) return;
+    RECT rc{};
+    GetClientRect(g_main, &rc);
+    RECT sb{};
+    int sbH = 22;
+    if (g_status) {
+        GetWindowRect(g_status, &sb);
+        sbH = sb.bottom - sb.top;
+    }
+    const int barW = 240;
+    const int pad = 6;
+    const int h = (std::max)(10, sbH - 6);
+    const int x = rc.right - pad - barW;
+    const int y = rc.bottom - sbH + 3;
+    MoveWindow(g_progress, x, y, barW, h, TRUE);
+    SetWindowPos(g_progress, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+}
+
+static void ShowProgressBar(bool show) {
+    if (!g_progress) return;
+    ShowWindow(g_progress, show ? SW_SHOW : SW_HIDE);
+    if (show) PlaceProgressBar();
+}
+
+static void SetProgressPos(unsigned done, unsigned total) {
+    if (!g_progress) return;
+    LONG style = GetWindowLongW(g_progress, GWL_STYLE);
+    if (style & PBS_MARQUEE) {
+        SendMessageW(g_progress, PBM_SETMARQUEE, FALSE, 0);
+        SetWindowLongW(g_progress, GWL_STYLE, style & ~PBS_MARQUEE);
+    }
+    unsigned maxv = 100, pos = 0;
+    if (total == 0) {
+        pos = done == 0 ? 0 : (4 + (done % 16));
+    } else {
+        maxv = total < 1 ? 1 : total;
+        pos = done > maxv ? maxv : done;
+    }
+    SendMessageW(g_progress, PBM_SETRANGE32, 0, (LPARAM)maxv);
+    if (pos < maxv)
+        SendMessageW(g_progress, PBM_SETPOS, (WPARAM)(pos + 1), 0);
+    SendMessageW(g_progress, PBM_SETPOS, (WPARAM)pos, 0);
+}
+
+static void ApplyProgressInfo(ProgInfo* p) {
+    if (!p) return;
+    if (p->seq && p->seq != g_loadSeq.load()) {
+        delete p;
+        return;
+    }
+    if (p->text[0]) SetStatus(p->text);
+    SetProgressPos(p->done, p->total);
+    PlaceProgressBar();
+    delete p;
+}
+
+static void PostProgress(HWND hwnd, unsigned seq, unsigned done, unsigned total, const wchar_t* text) {
+    const bool last = total > 0 && done >= total;
+    static thread_local DWORD s_tick = 0;
+    const DWORD now = GetTickCount();
+    if (!last && done > 0 && now - s_tick < 50)
+        return;
+    s_tick = now;
+    auto* p = new ProgInfo();
+    p->seq = seq;
+    p->done = done;
+    p->total = total;
+    if (text) wcsncpy_s(p->text, text, _TRUNCATE);
+    if (!IsWindow(hwnd) || !PostMessageW(hwnd, WM_APP_PROGRESS, 0, (LPARAM)p))
+        delete p;
+}
+
+struct ScanCtx {
+    HWND hwnd = nullptr;
+    unsigned seq = 0;
+};
+
+static void OnScanProgress(unsigned done, unsigned total, const wchar_t* name, void* ctx) {
+    auto* c = (ScanCtx*)ctx;
+    if (!c || c->seq != g_loadSeq.load()) return;
+    wchar_t buf[200];
+    unsigned pct = 0;
+    if (total == 0) {
+        swprintf_s(buf, L"Looking for .hed archives...  %u", done);
+        pct = done == 0 ? 0 : (2 + (done % 8));
+    } else {
+        swprintf_s(buf, L"Loading archives  %u / %u  %s", done, total, name ? name : L"");
+        pct = 10 + (unsigned)(60ull * done / (total ? total : 1));
+        if (done >= total) pct = 70;
+    }
+    PostProgress(c->hwnd, c->seq, pct, 100, buf);
+}
+
+static void PumpUi() {
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+static bool IsBusy() { return g_loading || g_exporting; }
 
 static void SetDirLabel() {
     std::wstring t = g_extractDir.empty() ? L"export: (not set — first export will ask)"
@@ -288,13 +417,26 @@ static std::wstring FileKindOf(const std::wstring& path) {
         (low.find(L"/icon/") != std::wstring::npos && ext == L".dds"))
         return L"icon";
     if (low.find(L"/tex/") != std::wstring::npos || fn.rfind(L"mst_", 0) == 0) return L"tex";
-    if (low.find(L"/model/") != std::wstring::npos || ext == L".dxg" || fn.rfind(L"msm_", 0) == 0)
+    if (low.find(L"/model/") != std::wstring::npos || ext == L".dxg" || ext == L".txg" ||
+        fn.rfind(L"msm_", 0) == 0)
         return L"model";
     if (low.find(L"/attr/") != std::wstring::npos || ext == L".vra" || fn.rfind(L"msz_", 0) == 0)
         return L"attr";
     if (low.find(L"/anim/") != std::wstring::npos || ext == L".mrb" || fn.rfind(L"msa_", 0) == 0)
         return L"anim";
     return L"other";
+}
+
+static bool IsImageExt(const std::wstring& ext) {
+    return ext == L".dds" || ext == L".png" || ext == L".tga" || ext == L".jpg" ||
+           ext == L".jpeg" || ext == L".bmp" || ext == L".hdr";
+}
+
+static bool IsMeshAsset(const std::wstring& path) {
+    const std::wstring ext = FileExt(path);
+    const std::wstring kind = FileKindOf(path);
+    return ext == L".dxg" || ext == L".txg" || ext == L".mrb" || ext == L".vra" ||
+           kind == L"model" || kind == L"anim" || kind == L"attr";
 }
 
 static int KindOrder(const std::wstring& kind) {
@@ -362,6 +504,287 @@ static void CollectRelatedFiles(const std::wstring& unit, std::vector<std::pair<
     });
 }
 
+static bool Wants3DPreview(const std::wstring& path) {
+    const std::wstring ext = FileExt(path);
+    return ext == L".dxg" || ext == L".txg" || ext == L".vra" || ext == L".mrb";
+}
+
+static std::pair<int, int> FindByVfsPath(std::wstring needle) {
+    needle = ToLower(NormVfs(needle));
+    if (needle.empty()) return {-1, -1};
+    auto it = g_pathIndex.find(needle);
+    if (it != g_pathIndex.end()) return it->second;
+    for (const auto& kv : g_pathIndex) {
+        if (kv.first.size() >= needle.size() &&
+            kv.first.compare(kv.first.size() - needle.size(), needle.size(), needle) == 0)
+            return kv.second;
+    }
+    const std::wstring fn = FileNameOf(needle);
+    if (!fn.empty()) {
+        for (const auto& kv : g_pathIndex)
+            if (FileNameOf(kv.first) == fn) return kv.second;
+    }
+    return {-1, -1};
+}
+
+static std::wstring StemOf(const std::wstring& path) {
+    std::wstring fn = FileNameOf(path);
+    const auto dot = fn.find_last_of(L'.');
+    if (dot != std::wstring::npos) fn.resize(dot);
+    return fn;
+}
+
+static std::pair<int, int> FindUnitByExt(const std::wstring& unit, const wchar_t* ext,
+                                         const std::wstring& preferStem) {
+    auto it = g_unitIndex.find(unit);
+    if (it == g_unitIndex.end()) return {-1, -1};
+    std::pair<int, int> best{-1, -1};
+    int bestScore = -1;
+    const std::wstring wantExt = ToLower(ext);
+    for (auto pr : it->second) {
+        if (pr.first < 0 || pr.first >= (int)g_cat.archives.size()) continue;
+        const auto& ar = g_cat.archives[pr.first];
+        if (pr.second < 0 || pr.second >= (int)ar.files.size()) continue;
+        const auto path = VfsPathOf(ar, ar.files[pr.second]);
+        if (FileExt(path) != wantExt) continue;
+        const std::wstring fn = ToLower(FileNameOf(path));
+        int s = 10;
+        if (!preferStem.empty() && ToLower(StemOf(path)) == ToLower(preferStem)) s += 80;
+        if (fn.rfind(L"msm_", 0) == 0 || fn.rfind(L"msz_", 0) == 0) s += 20;
+        if (fn.size() > 7 && fn.compare(fn.size() - 7, 7, L"_01.dxg") == 0) s += 40;
+        if (fn.size() > 7 && fn.compare(fn.size() - 7, 7, L"_01.vra") == 0) s += 40;
+        if (fn.find(L"_02.") != std::wstring::npos || fn.find(L"_03.") != std::wstring::npos) s -= 25;
+        if (s > bestScore) {
+            bestScore = s;
+            best = pr;
+        }
+    }
+    return best;
+}
+
+static void AppendRelatedDetails(std::wstring& text, const std::wstring& unit) {
+    if (unit.empty()) return;
+    auto it = g_unitIndex.find(unit);
+    if (it == g_unitIndex.end()) return;
+    struct Row {
+        std::wstring kind;
+        std::wstring path;
+        uint32_t size = 0;
+    };
+    std::vector<Row> rows;
+    rows.reserve(it->second.size());
+    for (auto pr : it->second) {
+        if (pr.first < 0 || pr.first >= (int)g_cat.archives.size()) continue;
+        const auto& ar = g_cat.archives[pr.first];
+        if (pr.second < 0 || pr.second >= (int)ar.files.size()) continue;
+        const auto& f = ar.files[pr.second];
+        const auto path = VfsPathOf(ar, f);
+        rows.push_back({FileKindOf(path), path, f.size});
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+        const int ka = KindOrder(a.kind);
+        const int kb = KindOrder(b.kind);
+        if (ka != kb) return ka < kb;
+        return a.path < b.path;
+    });
+    text += L"\r\n==== unit ";
+    text += unit;
+    text += L"  ";
+    text += std::to_wstring(rows.size());
+    text += L" related files ====\r\n";
+    std::wstring last;
+    for (const auto& r : rows) {
+        if (r.kind != last) {
+            last = r.kind;
+            text += L"[";
+            text += r.kind;
+            text += L"]\r\n";
+        }
+        wchar_t line[48];
+        swprintf_s(line, L"  %8u  ", r.size);
+        text += line;
+        text += r.path;
+        text += L"\r\n";
+    }
+}
+
+static void SetPreviewMode3D(bool on) {
+    if (g_d3dView) ShowWindow(g_d3dView, on ? SW_SHOW : SW_HIDE);
+    if (g_img) ShowWindow(g_img, on ? SW_HIDE : SW_SHOW);
+    if (g_prevFrame) {
+        if (on)
+            SetTimer(g_prevFrame, IDT_PREV3D, 33, nullptr);
+        else
+            KillTimer(g_prevFrame, IDT_PREV3D);
+    }
+    if (!on) Preview3D_Clear();
+}
+
+static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, std::wstring& text) {
+    const std::wstring ext = FileExt(vfsPath);
+    const std::wstring unit = UnitIdFromPath(vfsPath);
+    std::pair<int, int> dxgRef{-1, -1};
+    std::pair<int, int> vraRef{-1, -1};
+    std::wstring prefer;
+
+    if (ext == L".dxg" || ext == L".txg") {
+        dxgRef = {arch, fileIndex};
+        prefer = StemOf(vfsPath);
+        std::wstring vraStem = prefer;
+        if (vraStem.size() >= 4) {
+            const std::wstring pfx = ToLower(vraStem.substr(0, 4));
+            if (pfx == L"msm_") vraStem.replace(0, 3, L"MSZ");
+        }
+        vraRef = FindUnitByExt(unit, L".vra", vraStem);
+        if (vraRef.first < 0) vraRef = FindUnitByExt(unit, L".vra", L"");
+    } else if (ext == L".vra") {
+        vraRef = {arch, fileIndex};
+    } else if (ext == L".mrb") {
+        dxgRef = FindUnitByExt(unit, L".dxg", L"");
+        vraRef = FindUnitByExt(unit, L".vra", L"");
+    } else {
+        return false;
+    }
+
+    std::vector<uint8_t> dxgBytes, vraBytes;
+    std::wstring dxgPath, vraPath;
+    VraDoc vra;
+    try {
+        if (vraRef.first >= 0) {
+            const auto& ar = g_cat.archives[vraRef.first];
+            const auto& f = ar.files[(size_t)vraRef.second];
+            vraBytes = fpmf::ExtractFile(ar, f, &g_cat);
+            vraPath = VfsPathOf(ar, f);
+            if (!vraBytes.empty())
+                vra.Parse((const char*)vraBytes.data(), vraBytes.size());
+        }
+        if (dxgRef.first < 0 && !vra.geometry.empty())
+            dxgRef = FindByVfsPath(Widen(vra.geometry));
+        if (dxgRef.first < 0 && !unit.empty()) dxgRef = FindUnitByExt(unit, L".dxg", L"");
+        if (dxgRef.first < 0) {
+            text += L"3D: no DXG mesh found for this file.\r\n";
+            return false;
+        }
+        {
+            const auto& ar = g_cat.archives[dxgRef.first];
+            const auto& f = ar.files[(size_t)dxgRef.second];
+            dxgBytes = fpmf::ExtractFile(ar, f, &g_cat);
+            dxgPath = VfsPathOf(ar, f);
+        }
+    } catch (const std::exception& ex) {
+        text += L"3D extract failed: ";
+        text += Widen(ex.what());
+        text += L"\r\n";
+        return false;
+    }
+
+    struct Held {
+        std::string key;
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<Held> held;
+    auto addTex = [&](const std::wstring& texPath) {
+        auto ref = FindByVfsPath(texPath);
+        if (ref.first < 0 && !unit.empty()) {
+            const std::wstring fn = FileNameOf(ToLower(NormVfs(texPath)));
+            auto uit = g_unitIndex.find(unit);
+            if (uit != g_unitIndex.end()) {
+                for (auto pr : uit->second) {
+                    const auto& ar = g_cat.archives[pr.first];
+                    const auto p = VfsPathOf(ar, ar.files[pr.second]);
+                    if (ToLower(FileNameOf(p)) == fn) {
+                        ref = pr;
+                        break;
+                    }
+                }
+            }
+        }
+        if (ref.first < 0) return;
+        try {
+            const auto& ar = g_cat.archives[ref.first];
+            const auto& f = ar.files[(size_t)ref.second];
+            Held h;
+            h.key = Narrow(texPath);
+            h.bytes = fpmf::ExtractFile(ar, f, &g_cat);
+            if (!h.bytes.empty()) held.push_back(std::move(h));
+        } catch (...) {
+        }
+    };
+    for (const auto& m : vra.materials)
+        if (!m.texture.empty()) addTex(Widen(m.texture));
+    if (held.empty() && !unit.empty()) {
+        auto uit = g_unitIndex.find(unit);
+        if (uit != g_unitIndex.end()) {
+            int bestS = -1;
+            std::pair<int, int> best{-1, -1};
+            for (auto pr : uit->second) {
+                const auto& ar = g_cat.archives[pr.first];
+                const auto p = VfsPathOf(ar, ar.files[pr.second]);
+                const int s = PreviewScore(p);
+                if (s > bestS) {
+                    bestS = s;
+                    best = pr;
+                }
+            }
+            if (best.first >= 0 && bestS > 0) {
+                const auto& ar = g_cat.archives[best.first];
+                addTex(VfsPathOf(ar, ar.files[best.second]));
+            }
+        }
+    }
+
+    Preview3DInput in;
+    in.dxg = dxgBytes.data();
+    in.dxgSize = dxgBytes.size();
+    if (!vraBytes.empty()) {
+        in.vraText = (const char*)vraBytes.data();
+        in.vraSize = vraBytes.size();
+    }
+    for (const auto& h : held) {
+        Preview3DTex t;
+        t.key = h.key;
+        t.data = h.bytes.data();
+        t.size = h.bytes.size();
+        in.textures.push_back(t);
+    }
+    if (g_d3dView && !Preview3D_Init(g_d3dView)) {
+        text += L"3D: Direct3D 9 device failed.\r\n";
+        return false;
+    }
+    if (!Preview3D_Load(in)) {
+        text += L"3D: DXG parse/draw failed.\r\n";
+        return false;
+    }
+
+    text += L"3D preview (game path: one DXG, LOD0 only, no animation).\r\n";
+    text += L"Mesh: ";
+    text += dxgPath;
+    text += L"\r\n";
+    if (!vraPath.empty()) {
+        text += L"Attr: ";
+        text += vraPath;
+        text += L"\r\n";
+    }
+    if (!vra.geometry.empty()) {
+        text += L"Geometry: ";
+        text += Widen(vra.geometry);
+        text += L"\r\n";
+    }
+    wchar_t st[160];
+    swprintf_s(st, L"Draw: %u meshes  %u tris  %u bones  %u tex\r\n", Preview3D_MeshCount(),
+               Preview3D_TriCount(), Preview3D_BoneCount(), (unsigned)held.size());
+    text += st;
+    text += L"LMB orbit  wheel zoom  RMB toggle skeleton\r\n";
+    SetPreviewMode3D(true);
+    if (g_prevFrame) {
+        wchar_t title[640];
+        swprintf_s(title, L"%s   3D LOD0", FileNameOf(vfsPath).c_str());
+        SetWindowTextW(g_prevFrame, title);
+        if (!IsWindowVisible(g_prevFrame)) ShowPreviewFrame(true);
+    }
+    return true;
+}
+
 static bool ArchiveHasDat(const fpmf::Archive& ar) {
     if (fpmf::VolumeExists(ar, 0)) return true;
     return !ar.files.empty() && fpmf::VolumeExists(ar, ar.files[0].volume);
@@ -380,11 +803,15 @@ static int VfsAddChildTo(std::vector<VfsNode>& vfs, int parent, const std::wstri
 }
 
 static void BuildVfsInto(const fpmf::Catalog& cat, std::vector<VfsNode>& vfs,
-                         std::map<std::wstring, std::vector<std::pair<int, int>>>& unitIndex) {
+                         std::map<std::wstring, std::vector<std::pair<int, int>>>& unitIndex,
+                         std::map<std::wstring, std::pair<int, int>>& pathIndex,
+                         HWND hwnd = nullptr, unsigned seq = 0) {
     vfs.clear();
     vfs.push_back({});
     unitIndex.clear();
+    pathIndex.clear();
     std::map<std::wstring, std::pair<int, int>> owned;
+    const unsigned narch = (unsigned)cat.archives.size();
     for (int ai = 0; ai < (int)cat.archives.size(); ++ai) {
         const auto& ar = cat.archives[ai];
         if (!ArchiveHasDat(ar)) continue;
@@ -393,10 +820,18 @@ static void BuildVfsInto(const fpmf::Catalog& cat, std::vector<VfsNode>& vfs,
             if (path.empty()) continue;
             if (owned.find(path) != owned.end()) continue;
             owned[path] = {ai, fi};
+            pathIndex[ToLower(path)] = {ai, fi};
             const auto unit = UnitIdFromPath(path);
             if (!unit.empty()) unitIndex[unit].push_back({ai, fi});
         }
+        if (hwnd && narch) {
+            wchar_t buf[160];
+            swprintf_s(buf, L"Indexing archives  %u / %u", (unsigned)(ai + 1), narch);
+            PostProgress(hwnd, seq, 70 + 10 * (unsigned)(ai + 1) / narch, 100, buf);
+        }
     }
+    unsigned oi = 0;
+    const unsigned nown = (unsigned)owned.size();
     for (const auto& kv : owned) {
         const std::wstring& path = kv.first;
         int node = 0;
@@ -412,11 +847,17 @@ static void BuildVfsInto(const fpmf::Catalog& cat, std::vector<VfsNode>& vfs,
             if (!part.empty()) node = VfsAddChildTo(vfs, node, part);
             start = sl + 1;
         }
+        ++oi;
+        if (hwnd && nown && (oi % 256 == 0 || oi == nown)) {
+            wchar_t buf[160];
+            swprintf_s(buf, L"Building folders  %u / %u", oi, nown);
+            PostProgress(hwnd, seq, 80 + 12 * oi / nown, 100, buf);
+        }
     }
 }
 
 static void BuildVfs() {
-    BuildVfsInto(g_cat, g_vfs, g_unitIndex);
+    BuildVfsInto(g_cat, g_vfs, g_unitIndex, g_pathIndex);
     g_vfsSel = 0;
 }
 
@@ -425,14 +866,23 @@ struct LoadResult {
     fpmf::Catalog cat;
     std::vector<VfsNode> vfs;
     std::map<std::wstring, std::vector<std::pair<int, int>>> unitIndex;
+    std::map<std::wstring, std::pair<int, int>> pathIndex;
     std::string error;
 };
 
-static void SetLoadingUi(bool busy) {
-    g_loading = busy;
+static void SetBusyUi(bool busy) {
     if (g_tree) EnableWindow(g_tree, !busy);
     if (g_list) EnableWindow(g_list, !busy);
+    if (g_filter) EnableWindow(g_filter, !busy);
+    if (g_search) EnableWindow(g_search, !busy);
     if (busy) SetCursor(LoadCursor(nullptr, IDC_APPSTARTING));
+}
+
+static void SetLoadingUi(bool busy) {
+    g_loading = busy;
+    SetBusyUi(busy);
+    ShowProgressBar(busy);
+    if (busy) SetProgressPos(0, 100);
 }
 
 static void ApplyLoadResult(LoadResult* r) {
@@ -449,15 +899,20 @@ static void ApplyLoadResult(LoadResult* r) {
         return;
     }
     ClearBitmap();
+    SetPreviewMode3D(false);
     g_visible.clear();
     g_cat = std::move(r->cat);
     g_vfs = std::move(r->vfs);
     g_unitIndex = std::move(r->unitIndex);
+    g_pathIndex = std::move(r->pathIndex);
     g_vfsSel = 0;
     g_arch = -1;
     delete r;
     SaveConfig();
+    SetStatus(L"Filling folder tree...");
+    SetProgressPos(92, 100);
     FillTree();
+    SetProgressPos(100, 100);
     FillList(g_vfsSel);
     SetWindowTextW(g_preview,
                    L"Folders are the game virtual path (world/field/D00/...).\r\n"
@@ -470,9 +925,12 @@ static void LoadDataThread(std::filesystem::path root, unsigned seq, HWND hwnd) 
     auto* r = new LoadResult();
     r->seq = seq;
     try {
-        r->cat = fpmf::ScanDataRoot(root);
-        if (seq == g_loadSeq.load())
-            BuildVfsInto(r->cat, r->vfs, r->unitIndex);
+        ScanCtx ctx{hwnd, seq};
+        r->cat = fpmf::ScanDataRoot(root, OnScanProgress, &ctx);
+        if (seq == g_loadSeq.load()) {
+            PostProgress(hwnd, seq, 70, 100, L"Building virtual folder tree...");
+            BuildVfsInto(r->cat, r->vfs, r->unitIndex, r->pathIndex, hwnd, seq);
+        }
     } catch (const std::exception& ex) {
         r->error = ex.what();
     }
@@ -611,7 +1069,7 @@ static void FillList(int node) {
 static void ApplyFilter(bool refreshTree) {
     ReadFilterUi();
     SaveConfig();
-    if (g_loading) return;
+    if (IsBusy()) return;
     if (refreshTree) FillTree();
     FillList(g_vfsSel);
 }
@@ -676,6 +1134,7 @@ static void ShowPreview(int arch, int fileIndex) {
     const auto& ar = g_cat.archives[arch];
     const auto& f = ar.files[fileIndex];
     ClearBitmap();
+    SetPreviewMode3D(false);
     try {
         auto data = fpmf::ExtractFile(ar, f, &g_cat);
         const char* kind = fpmf::GuessKind(DisplayName(f), data.data(), data.size());
@@ -692,7 +1151,14 @@ static void ShowPreview(int arch, int fileIndex) {
         text += RelHed(ar);
         text += L"\r\n\r\n";
 
-        if (DecodeImage(data.data(), data.size(), DisplayName(f), g_imgData)) {
+        const std::wstring vfsPath = VfsPathOf(ar, f);
+        const std::wstring ext = FileExt(DisplayName(f));
+        const std::wstring unit = UnitIdFromPath(vfsPath);
+        const bool mesh = IsMeshAsset(vfsPath);
+        const bool want3d = Wants3DPreview(vfsPath);
+        if (want3d) {
+            Load3DPreview(arch, fileIndex, vfsPath, text);
+        } else if (!mesh && DecodeImage(data.data(), data.size(), DisplayName(f), g_imgData)) {
             g_bmp = ImageToBitmap(g_imgData);
             {
                 const size_t n = (size_t)g_imgData.w * (size_t)g_imgData.h;
@@ -721,15 +1187,27 @@ static void ShowPreview(int arch, int fileIndex) {
                 if (!IsWindowVisible(g_prevFrame)) ShowPreviewFrame(true);
             }
         } else {
-            const std::wstring ext = FileExt(DisplayName(f));
-            if (ext == L".dds" || ext == L".png" || ext == L".tga" || ext == L".jpg" ||
-                ext == L".jpeg" || ext == L".bmp" || ext == L".hdr") {
+            if (mesh) {
+                const std::wstring mk = FileKindOf(vfsPath);
+                text += L"This is 3D data, not a PNG/DDS texture.\r\n";
+                if (mk == L"model" || ext == L".dxg" || ext == L".txg")
+                    text += L"Kind: mesh / model\r\n";
+                else if (mk == L"anim" || ext == L".mrb")
+                    text += L"Kind: animation\r\n";
+                else if (mk == L"attr" || ext == L".vra")
+                    text += L"Kind: model attributes\r\n";
+                text += L"Image preview is only for textures. Related DDS is not shown.\r\n\r\n";
+                if (g_prevFrame) {
+                    wchar_t title[640];
+                    swprintf_s(title, L"%s   3D (no image)", DisplayName(f).c_str());
+                    SetWindowTextW(g_prevFrame, title);
+                }
+            } else if (IsImageExt(ext)) {
                 text += L"Preview failed: ";
                 text += Widen(LastImageError());
                 text += L"\r\n\r\n";
             }
-            const std::wstring unit = UnitIdFromPath(VfsPathOf(ar, f));
-            if (!g_bmp && !unit.empty()) {
+            if (!mesh && !g_bmp && !unit.empty()) {
                 const auto best = BestUnitPreview(unit);
                 if (best.first >= 0 && (best.first != arch || best.second != fileIndex)) {
                     try {
@@ -759,15 +1237,17 @@ static void ShowPreview(int arch, int fileIndex) {
             }
         }
 
+        AppendRelatedDetails(text, unit);
+
         const bool textLike = strstr(kind, "CSV") || strstr(kind, "Text") || strstr(kind, "XML");
-        if (textLike && !data.empty()) {
+        if (textLike && !data.empty() && !Preview3D_Active()) {
             data.push_back(0);
             const int n = MultiByteToWideChar(CP_ACP, 0, (char*)data.data(), -1, nullptr, 0);
             std::wstring body(n > 0 ? n - 1 : 0, 0);
             if (n > 1) MultiByteToWideChar(CP_ACP, 0, (char*)data.data(), -1, body.data(), n);
             if (body.size() > 8000) body.resize(8000);
             text += body;
-        } else if (!g_bmp) {
+        } else if (!g_bmp && !Preview3D_Active()) {
             wchar_t line[96];
             const size_t show = (std::min)(data.size(), (size_t)256);
             for (size_t i = 0; i < show; i += 16) {
@@ -869,6 +1349,7 @@ static std::filesystem::path EnsureExtractDir() {
 
 static void OpenDataRoot(const std::filesystem::path& root) {
     std::error_code ec;
+    if (g_exporting) return;
     if (root.empty() || !std::filesystem::exists(root, ec)) return;
     const unsigned seq = ++g_loadSeq;
     SetLoadingUi(true);
@@ -884,7 +1365,7 @@ static void OpenDataRoot(const std::filesystem::path& root) {
 }
 
 static void ExtractSelected(bool asPng) {
-    if (g_loading) return;
+    if (IsBusy()) return;
     const auto sel = SelectedEntry();
     if (sel.first < 0) return;
     g_arch = sel.first;
@@ -898,6 +1379,11 @@ static void ExtractSelected(bool asPng) {
     try {
         auto dest = ExportDest(destRoot, g_vfsSel, ar, f);
         if (asPng) {
+            if (IsMeshAsset(VfsPathOf(ar, f))) {
+                MessageBoxW(g_main, L"This is a 3D file, not a texture. Export original instead.",
+                            L"Export PNG", MB_ICONWARNING);
+                return;
+            }
             dest.replace_extension(L".png");
             ImageRgba img = g_imgData;
             if (img.w <= 0) {
@@ -932,7 +1418,7 @@ static void CollectVfs(int node, bool rec, bool onlyVisible, std::vector<std::pa
 }
 
 static void ExtractArchive(int node, bool onlyVisible, bool asPng) {
-    if (g_loading || g_vfs.empty()) return;
+    if (IsBusy() || g_vfs.empty()) return;
     if (node < 0 || node >= (int)g_vfs.size()) node = g_vfsSel;
     auto destRoot = EnsureExtractDir();
     if (destRoot.empty()) return;
@@ -945,12 +1431,21 @@ static void ExtractArchive(int node, bool onlyVisible, bool asPng) {
         return;
     }
     int ok = 0, fail = 0;
+    g_exporting = true;
+    SetBusyUi(true);
+    ShowProgressBar(true);
+    SetProgressPos(0, (unsigned)idxs.size());
     for (size_t n = 0; n < idxs.size(); ++n) {
         const auto& ar = g_cat.archives[idxs[n].first];
         const auto& f = ar.files[(size_t)idxs[n].second];
         try {
             auto dest = ExportDest(destRoot, node, ar, f);
             if (asPng) {
+                if (IsMeshAsset(VfsPathOf(ar, f))) {
+                    ++fail;
+                    SetProgressPos((unsigned)(n + 1), (unsigned)idxs.size());
+                    continue;
+                }
                 dest.replace_extension(L".png");
                 auto data = fpmf::ExtractFile(ar, f, &g_cat);
                 ImageRgba img;
@@ -968,20 +1463,21 @@ static void ExtractArchive(int node, bool onlyVisible, bool asPng) {
         } catch (...) {
             ++fail;
         }
-        if ((n % 25) == 0 || n + 1 == idxs.size()) {
+        SetProgressPos((unsigned)(n + 1), (unsigned)idxs.size());
+        if ((n % 8) == 0 || n + 1 == idxs.size()) {
             wchar_t st[192];
             const wchar_t* folder = g_vfs[node].full.empty() ? L"(root)" : g_vfs[node].full.c_str();
             swprintf_s(st, L"Exporting %s  %u / %u  (ok %d, fail %d)", folder,
                        (unsigned)(n + 1), (unsigned)idxs.size(), ok, fail);
             SetStatus(st);
             UpdateWindow(g_status);
-            MSG msg;
-            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
+            UpdateWindow(g_progress);
+            PumpUi();
         }
     }
+    g_exporting = false;
+    SetBusyUi(false);
+    ShowProgressBar(false);
     const auto outDir = destRoot / SanitizePathPart(g_vfs[node].name.empty() ? L"root" : g_vfs[node].name);
     wchar_t msg[256];
     swprintf_s(msg, L"Saved %d, failed %d\n%s", ok, fail, outDir.wstring().c_str());
@@ -1042,11 +1538,13 @@ static void LayoutPreview() {
     RECT rc{};
     GetClientRect(g_prevFrame, &rc);
     const int pad = 8;
-    const int infoH = 160;
+    const int infoH = 260;
     const int imgH = (std::max)(80, (int)rc.bottom - infoH - pad * 3);
     const int cw = (std::max)(1, (int)rc.right - pad * 2);
     MoveWindow(g_img, pad, pad, cw, imgH, TRUE);
+    if (g_d3dView) MoveWindow(g_d3dView, pad, pad, cw, imgH, TRUE);
     MoveWindow(g_preview, pad, pad + imgH + pad, cw, infoH, TRUE);
+    if (Preview3D_Active()) Preview3D_Resize();
 }
 
 static LRESULT CALLBACK PrevFrameProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
@@ -1054,7 +1552,11 @@ static LRESULT CALLBACK PrevFrameProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     case WM_SIZE:
         LayoutPreview();
         return 0;
+    case WM_TIMER:
+        if (w == IDT_PREV3D && Preview3D_Active()) Preview3D_Render();
+        return 0;
     case WM_CLOSE:
+        KillTimer(hwnd, IDT_PREV3D);
         ShowWindow(hwnd, SW_HIDE);
         return 0;
     }
@@ -1067,6 +1569,7 @@ static void ShowPreviewFrame(bool show) {
     if (show) {
         LayoutPreview();
         InvalidateRect(g_img, nullptr, FALSE);
+        if (g_d3dView && Preview3D_Active()) Preview3D_Render();
     }
 }
 
@@ -1091,9 +1594,10 @@ static void Layout(HWND hwnd) {
     MoveWindow(g_lblDir, pad + 672, 8, (std::max)(80, (int)rc.right - pad - 680), 20, TRUE);
     MoveWindow(g_tree, x, y, treeW, h, TRUE);
     MoveWindow(g_list, x + treeW + pad, y, w - treeW - pad, h, TRUE);
-    int parts[2] = {rc.right / 2, -1};
+    int parts[2] = {(std::max)(80, (int)rc.right - 250), -1};
     SendMessageW(g_status, SB_SETPARTS, 2, (LPARAM)parts);
     SendMessageW(g_status, WM_SIZE, 0, 0);
+    PlaceProgressBar();
 }
 
 static LRESULT CALLBACK ImgProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
@@ -1184,7 +1688,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     case WM_CREATE: {
         INITCOMMONCONTROLSEX icc{sizeof(icc),
                                  ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES |
-                                     ICC_STANDARD_CLASSES};
+                                     ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS};
         InitCommonControlsEx(&icc);
         HMENU men = CreateMenu();
         HMENU file = CreatePopupMenu();
@@ -1212,7 +1716,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                                    WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL,
                                    0, 0, 0, 0, hwnd, (HMENU)ID_FILTER, nullptr, nullptr);
         const wchar_t* exts[] = {L"(all)", L".dds", L".png", L".tga", L".ogg", L".ogv",
-                                 L".mrb",  L".vra", L".dxg", L".cfg", L".xml", L".csv",
+                                 L".mrb",  L".vra", L".dxg", L".txg", L".cfg", L".xml", L".csv",
                                  L".ttc",  L".ttf"};
         for (auto* e : exts) SendMessageW(g_filter, CB_ADDSTRING, 0, (LPARAM)e);
 
@@ -1282,6 +1786,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
         g_img = CreateWindowExW(WS_EX_CLIENTEDGE, L"GundamImgPrev", L"", WS_CHILD | WS_VISIBLE, 0, 0,
                                 0, 0, g_prevFrame, (HMENU)ID_IMGPREV, nullptr, nullptr);
+        g_d3dView = CreateWindowExW(0, L"GundamD3DPrev", L"", WS_CHILD, 0, 0, 0, 0, g_prevFrame,
+                                    (HMENU)ID_D3DPREV, nullptr, nullptr);
         g_preview = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                     WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY |
                                         ES_AUTOVSCROLL,
@@ -1301,6 +1807,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         SendMessageW(g_list, WM_SETFONT, (WPARAM)ui, TRUE);
         g_status = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
                                    (HMENU)ID_STATUS, nullptr, nullptr);
+        g_progress = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_SMOOTH, 0, 0, 0, 0, hwnd,
+                                     (HMENU)ID_PROGRESS, nullptr, nullptr);
+        SetWindowTheme(g_progress, L"", L"");
+        SendMessageW(g_progress, PBM_SETRANGE32, 0, 100);
+        SendMessageW(g_progress, PBM_SETPOS, 0, 0);
 
         if (!g_filterExt.empty())
             SetWindowTextW(g_filter, g_filterExt.c_str());
@@ -1311,13 +1822,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_SETCURSOR:
-        if (g_loading && (HWND)w == hwnd) {
+        if (IsBusy() && (HWND)w == hwnd) {
             SetCursor(LoadCursor(nullptr, IDC_APPSTARTING));
             return TRUE;
         }
         break;
     case WM_APP_LOAD_DONE:
         ApplyLoadResult((LoadResult*)l);
+        return 0;
+    case WM_APP_PROGRESS:
+        ApplyProgressInfo((ProgInfo*)l);
         return 0;
     case WM_SIZE:
         Layout(hwnd);
@@ -1458,6 +1972,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     case WM_DESTROY:
         ++g_loadSeq;
         g_loading = false;
+        g_exporting = false;
+        if (g_prevFrame) KillTimer(g_prevFrame, IDT_PREV3D);
+        Preview3D_Shutdown();
         SaveConfig();
         ClearBitmap();
         PostQuitMessage(0);
@@ -1536,6 +2053,14 @@ int wmain(int argc, wchar_t** argv) {
     ic.hCursor = LoadCursor(nullptr, IDC_ARROW);
     ic.hbrBackground = nullptr;
     RegisterClassW(&ic);
+
+    WNDCLASSW dc{};
+    dc.lpfnWndProc = Preview3D_WndProc;
+    dc.hInstance = hi;
+    dc.lpszClassName = L"GundamD3DPrev";
+    dc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    dc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    RegisterClassW(&dc);
 
     g_main = CreateWindowExW(0, wc.lpszClassName, L"Gundam Online FPMF Viewer",
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1180, 760,

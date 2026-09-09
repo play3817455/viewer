@@ -190,6 +190,10 @@ bool DecodeImage(const uint8_t* data, size_t size, const std::wstring& path, Ima
         return false;
     }
     const std::wstring ext = ExtOf(path);
+    if (ext == L".dxg" || ext == L".txg" || ext == L".mrb" || ext == L".vra") {
+        SetErr("3D mesh/anim/attr, not an image");
+        return false;
+    }
 
     if (ext == L".dds") {
         if (size < 4 || memcmp(data, "DDS ", 4) != 0) {
@@ -217,15 +221,14 @@ bool DecodeImage(const uint8_t* data, size_t size, const std::wstring& path, Ima
         if (SUCCEEDED(hr) && ToRgba(image, out, "HDR")) return true;
     }
 
-    {
+    const bool tryWic = ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".bmp" ||
+                        ext == L".tif" || ext == L".tiff" || ext == L".gif" || ext.empty();
+    if (tryWic) {
         DirectX::ScratchImage image;
         const HRESULT hr =
             DirectX::LoadFromWICMemory(data, size, DirectX::WIC_FLAGS_NONE, nullptr, image);
         if (SUCCEEDED(hr) && ToRgba(image, out, "WIC")) return true;
-        if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".bmp" ||
-            ext == L".tif" || ext == L".tiff" || ext == L".gif") {
-            SetErr("LoadFromWICMemory failed", hr);
-        }
+        if (!ext.empty()) SetErr("LoadFromWICMemory failed", hr);
     }
 
     if (g_err == "no image" || g_err.empty()) SetErr("unsupported image format");

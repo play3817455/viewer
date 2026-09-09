@@ -33,10 +33,13 @@ add_executable(GundamRes
     src/main.cpp
     src/fpmf.cpp
     src/image_io.cpp
+    src/dxg.cpp
+    src/vra_text.cpp
+    src/preview3d.cpp
 )
 target_include_directories(GundamRes PRIVATE src)
 target_compile_definitions(GundamRes PRIVATE UNICODE _UNICODE NOMINMAX)
-target_link_libraries(GundamRes PRIVATE DirectXTex ole32 windowscodecs)
+target_link_libraries(GundamRes PRIVATE DirectXTex ole32 windowscodecs d3d9)
 if (MSVC)
     target_compile_options(GundamRes PRIVATE /utf-8 /W3)
 endif()

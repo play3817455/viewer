@@ -147,18 +147,26 @@ std::filesystem::path NormalizeDataRoot(const std::filesystem::path& path) {
     return p;
 }
 
-Catalog ScanDataRoot(const std::filesystem::path& dataRoot) {
+Catalog ScanDataRoot(const std::filesystem::path& dataRoot, ScanProgressFn progress, void* ctx) {
     Catalog cat;
     cat.dataRoot = NormalizeDataRoot(dataRoot);
     if (!std::filesystem::exists(cat.dataRoot)) return cat;
+    if (progress) progress(0, 0, L"", ctx);
     std::vector<std::filesystem::path> heds;
+    unsigned found = 0;
     for (auto& ent : std::filesystem::recursive_directory_iterator(cat.dataRoot)) {
         if (ent.is_regular_file() && ent.path().extension() == L".hed") {
             heds.push_back(ent.path());
+            ++found;
+            if (progress && (found == 1 || (found % 8) == 0))
+                progress(found, 0, ent.path().filename().c_str(), ctx);
         }
     }
     std::sort(heds.begin(), heds.end());
     cat.archives.reserve(heds.size());
+    const unsigned total = (unsigned)heds.size();
+    if (progress) progress(0, total, L"", ctx);
+    unsigned i = 0;
     for (const auto& h : heds) {
         try {
             Archive ar = LoadHed(h);
@@ -166,6 +174,8 @@ Catalog ScanDataRoot(const std::filesystem::path& dataRoot) {
             cat.archives.push_back(std::move(ar));
         } catch (...) {
         }
+        ++i;
+        if (progress) progress(i, total, h.filename().c_str(), ctx);
     }
     return cat;
 }
@@ -407,6 +417,9 @@ const char* GuessKind(const std::wstring& path, const uint8_t* data, size_t size
         return "Ogg (FMOD / VLC)";
     if (size >= 4 && data[0] == 't' && data[1] == 't' && data[2] == 'c' && data[3] == 'f')
         return "TrueType Collection";
+    if (has(L".dxg") || has(L".txg")) return "3D model (mesh)";
+    if (has(L".mrb")) return "3D animation";
+    if (has(L".vra")) return "3D model attributes";
     if (size >= 4 && data[0] == 'D' && data[1] == 'D' && data[2] == 'S' && data[3] == ' ')
         return "DirectDraw Surface";
     if (has(L".ogg")) return "Ogg Vorbis";

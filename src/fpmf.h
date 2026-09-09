@@ -42,7 +42,9 @@ void DecryptDat(uint8_t* data, size_t size, const uint8_t fileKey[8]);
 
 std::filesystem::path NormalizeDataRoot(const std::filesystem::path& path);
 Archive LoadHed(const std::filesystem::path& hedPath);
-Catalog ScanDataRoot(const std::filesystem::path& dataRoot);
+using ScanProgressFn = void (*)(unsigned done, unsigned total, const wchar_t* name, void* ctx);
+Catalog ScanDataRoot(const std::filesystem::path& dataRoot,
+                     ScanProgressFn progress = nullptr, void* ctx = nullptr);
 
 std::filesystem::path VolumePath(const Archive& ar, uint32_t volume);
 bool VolumeExists(const Archive& ar, uint32_t volume);
