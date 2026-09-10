@@ -78,6 +78,7 @@ static void ClearBitmap();
 static void FillTree();
 static void FillList(int node);
 static fpmf::Catalog g_cat;
+static std::vector<uint8_t> g_heldAnim;  // keeps the loaded .mrb alive
 static int g_arch = -1;
 static int g_vfsSel = 0;
 static bool g_suspendNotify = false;
@@ -756,7 +757,57 @@ static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, 
         return false;
     }
 
-    text += L"3D preview (game path: one DXG, LOD0 only, no animation).\r\n";
+    // Motion: walk every .mrb of this unit. Quite a few of them are stubs that
+    // do not parse (or carry a single key), and taking the first one used to
+    // leave the model frozen in bind pose, so keep the longest one that loads.
+    std::wstring animPath;
+    {
+        auto uit = g_unitIndex.find(unit);
+        if (uit != g_unitIndex.end()) {
+            std::vector<uint8_t> bestBytes;
+            std::wstring bestPath;
+            unsigned bestDur = 0;
+            unsigned bestBones = 0;
+            int tried = 0;
+            for (auto pr : uit->second) {
+                if (tried >= 60) break;
+                if (pr.first < 0 || pr.first >= (int)g_cat.archives.size()) continue;
+                const auto& ar = g_cat.archives[pr.first];
+                if (pr.second < 0 || pr.second >= (int)ar.files.size()) continue;
+                const auto path = VfsPathOf(ar, ar.files[pr.second]);
+                if (FileExt(path) != L".mrb") continue;
+                ++tried;
+                try {
+                    auto bytes = fpmf::ExtractFile(ar, ar.files[pr.second], &g_cat);
+                    if (!Preview3D_LoadMotion(bytes.data(), bytes.size())) continue;
+                    const unsigned dur = Preview3D_MotionDuration();
+                    const unsigned bones = Preview3D_MotionBones();
+                    // prefer a motion that drives the whole skeleton, then the
+                    // longest one, so a small partial clip is not picked
+                    if (bestBytes.empty() || bones > bestBones ||
+                        (bones == bestBones && dur > bestDur)) {
+                        bestBones = bones;
+                        bestDur = dur;
+                        bestPath = path;
+                        bestBytes = std::move(bytes);
+                    }
+                } catch (...) {
+                }
+            }
+            if (!bestBytes.empty()) {
+                Preview3D_LoadMotion(bestBytes.data(), bestBytes.size());
+                animPath = bestPath;
+                g_heldAnim = std::move(bestBytes);
+            }
+        }
+    }
+
+    text += L"3D preview (game path: one DXG, LOD0 parts, motion driven).\r\n";
+    if (!animPath.empty()) {
+        text += L"Motion: ";
+        text += animPath;
+        text += L"\r\n";
+    }
     text += L"Mesh: ";
     text += dxgPath;
     text += L"\r\n";
@@ -773,6 +824,10 @@ static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, 
     wchar_t st[160];
     swprintf_s(st, L"Draw: %u meshes  %u tris  %u bones  %u tex\r\n", Preview3D_MeshCount(),
                Preview3D_TriCount(), Preview3D_BoneCount(), (unsigned)held.size());
+    text += st;
+    swprintf_s(st, L"Rig: %u/%u parts bound to bones, motion bones=%u dur=%ums\r\n",
+               Preview3D_BoundParts(), Preview3D_PartCount(), Preview3D_MotionBones(),
+               Preview3D_MotionDuration());
     text += st;
     text += L"LMB orbit  wheel zoom  RMB toggle skeleton\r\n";
     SetPreviewMode3D(true);

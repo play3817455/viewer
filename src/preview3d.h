@@ -23,6 +23,13 @@ bool Preview3D_Init(HWND hwnd);
 void Preview3D_Shutdown();
 void Preview3D_Clear();
 bool Preview3D_Load(const Preview3DInput& in);
+// Feed a .mrb motion; the skeleton (already loaded) is driven by it.
+bool Preview3D_LoadMotion(const uint8_t* data, size_t size);
+bool Preview3D_HasMotion();
+unsigned Preview3D_MotionDuration();   // milliseconds, 0 without a motion
+unsigned Preview3D_MotionBones();      // animated bone count, 0 without a motion
+unsigned Preview3D_BoundParts();       // parts attached to a bone
+unsigned Preview3D_PartCount();        // total parts
 bool Preview3D_Active();
 void Preview3D_Resize();
 void Preview3D_Render();

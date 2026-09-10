@@ -1,6 +1,7 @@
 #include "preview3d.h"
 
 #include "dxg.h"
+#include "anim.h"
 #include "image_io.h"
 #include "vra_text.h"
 
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstring>
 #include <map>
 #include <string>
@@ -39,6 +41,20 @@ struct DrawMesh {
     bool alphaTest = false;
     bool additive = false;
     bool translucent = false;
+    std::string name;
+    bool weapon = false;
+    int bone = -1;    // skeleton bone this part rides on (-1 = static)
+    float cx = 0.0f;  // part centre, used to pick the bone
+    float cy = 0.0f;
+    float cz = 0.0f;
+
+    // per vertex skinning (sub_B71290 layout: one bone per vertex)
+    std::vector<DxgVec3> basePos;     // bind pose positions
+    std::vector<DxgVec3> baseNrm;     // bind pose normals
+    std::vector<std::string> shapeBones;  // shape bone palette
+    std::vector<uint16_t> vertBone;   // per vertex palette slot
+    std::vector<int> vbone;           // per vertex global bone index (-1 = static)
+    bool skinned = false;
 };
 
 HWND g_hwnd = nullptr;
@@ -59,7 +75,206 @@ std::vector<DrawMesh> g_draws;
 std::vector<IDirect3DTexture9*> g_texOwned;
 IDirect3DVertexBuffer9* g_skelVb = nullptr;
 unsigned g_skelVerts = 0;
+unsigned g_skelBytes = 0;
 DWORD g_fvf = D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX1;
+
+// --- interactive control state (WASD move / 1-4 weapon / LMB attack) ---
+bool g_keys[256] = {};
+int g_weaponMode = 0;          // 0 = both, 1 = right only, 2 = left only, 3 = none
+float g_attack = 0.0f;         // attack animation time remaining (seconds)
+const float kAttackDur = 0.55f;
+float g_walkPhase = 0.0f;
+bool g_useBones = true;        // B toggles: false = every part stays in model space
+bool g_useSkin = false;        // M toggles per vertex skinning (still being verified)
+float g_moveX = 0.0f, g_moveZ = 0.0f;
+float g_facing = 0.0f;
+float g_bob = 0.0f;
+DWORD g_lastTick = 0;
+POINT g_down{};
+
+// --- skeleton / motion ---
+std::vector<DxgBone> g_bones;
+std::vector<float> g_boneWorld;   // animated world matrices (16 per bone)
+MrbMotion g_motion;
+float g_animTime = 0.0f;          // milliseconds
+
+void DecomposeInv(const float* m, float R[9], float t[3]) {
+    // column-major: A[row][col] = m[col*4+row], A = R^T  =>  R[row][col] = m[row*4+col]
+    R[0] = m[0]; R[1] = m[1]; R[2] = m[2];
+    R[3] = m[4]; R[4] = m[5]; R[5] = m[6];
+    R[6] = m[8]; R[7] = m[9]; R[8] = m[10];
+    const float b[3] = {m[12], m[13], m[14]};
+    t[0] = -(R[0] * b[0] + R[1] * b[1] + R[2] * b[2]);
+    t[1] = -(R[3] * b[0] + R[4] * b[1] + R[5] * b[2]);
+    t[2] = -(R[6] * b[0] + R[7] * b[1] + R[8] * b[2]);
+}
+
+void BindWorld(std::vector<float>& out) {
+    const size_t n = g_bones.size();
+    out.assign(n * 16, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        float R[9], t[3];
+        DecomposeInv(g_bones[i].m, R, t);
+        float* W = &out[i * 16];
+        W[0] = R[0]; W[4] = R[1]; W[8] = R[2];  W[12] = t[0];
+        W[1] = R[3]; W[5] = R[4]; W[9] = R[5];  W[13] = t[1];
+        W[2] = R[6]; W[6] = R[7]; W[10] = R[8]; W[14] = t[2];
+        W[3] = 0;    W[7] = 0;    W[11] = 0;    W[15] = 1.0f;
+    }
+}
+
+// Part -> bone binding.
+// Strict name correspondence only (no geometry guessing):
+//   part "Hand_01"  -> head "Hand"
+//   bone "T_L_Hand" -> tail "Hand"
+// Only when they are equal is the part bound to the bone. A part with no
+// matching bone (body shells, decals, ...) stays in model space.
+int FindBoneForPart(const std::string& part, float cx, float cy, float cz) {
+    if (g_bones.empty()) return -1;
+    auto lower = [](const std::string& s) {
+        std::string o;
+        for (char c : s) o.push_back((char)(c >= 'A' && c <= 'Z' ? c + 32 : c));
+        return o;
+    };
+    auto head = [&](const std::string& s) {
+        const auto p = s.find('_');
+        return lower(p == std::string::npos ? s : s.substr(0, p));
+    };
+    auto tail = [&](const std::string& s) {
+        const auto p = s.rfind('_');
+        return lower(p == std::string::npos ? s : s.substr(p + 1));
+    };
+    std::string key = head(part);
+    if (key == "saber" || key == "gun" || key == "rifle" || key == "shield") key = "hand";
+    if (key.empty()) return -1;
+
+    std::vector<int> hits;
+    for (size_t i = 0; i < g_bones.size(); ++i) {
+        if (tail(g_bones[i].name) == key) hits.push_back((int)i);
+    }
+    if (hits.empty()) return -1;
+    std::vector<float> bw;
+    BindWorld(bw);
+    int best = hits[0];
+    if (hits.size() > 1) {
+        // left/right: take the side matching the part's X
+        float bestD = 1.0e9f;
+        for (int h : hits) {
+            const float d = fabsf(bw[(size_t)h * 16 + 12] - cx);
+            if (d < bestD) {
+                bestD = d;
+                best = h;
+            }
+        }
+    }
+    // safety: the part must actually sit at that bone in bind pose, otherwise the
+    // name match is a coincidence - keep it in model space instead of dragging it
+    const float* W = &bw[(size_t)best * 16];
+    const float dx = W[12] - cx, dy = W[13] - cy, dz = W[14] - cz;
+    const float lim = (g_radius > 1.0f ? g_radius : 100.0f) * 0.75f;
+    if (dx * dx + dy * dy + dz * dz > lim * lim) return -1;
+    return best;
+}
+
+// Rebuild the skeleton line list from the current world matrices.
+void UpdateSkeletonVb() {
+    if (!g_dev || g_bones.empty()) return;
+    std::vector<float> lines;
+    for (size_t i = 0; i < g_bones.size(); ++i) {
+        const int p = g_bones[i].parent;
+        if (p < 0 || (size_t)p >= g_bones.size()) continue;
+        if ((size_t)i * 16 + 14 >= g_boneWorld.size()) break;
+        const float* a = &g_boneWorld[(size_t)p * 16];
+        const float* b = &g_boneWorld[i * 16];
+        lines.push_back(a[12]); lines.push_back(a[13]); lines.push_back(a[14]);
+        lines.push_back(b[12]); lines.push_back(b[13]); lines.push_back(b[14]);
+    }
+    if (lines.empty()) return;
+    const UINT bytes = (UINT)(lines.size() * sizeof(float));
+    if (!g_skelVb || bytes > g_skelBytes) {
+        if (g_skelVb) g_skelVb->Release();
+        g_skelVb = nullptr;
+        g_skelBytes = bytes;
+        if (FAILED(g_dev->CreateVertexBuffer(bytes, D3DUSAGE_DYNAMIC, D3DFVF_XYZ,
+                                            D3DPOOL_DEFAULT, &g_skelVb, nullptr))) {
+            g_skelVb = nullptr;
+            return;
+        }
+    }
+    void* p = nullptr;
+    if (SUCCEEDED(g_skelVb->Lock(0, bytes, &p, D3DLOCK_DISCARD))) {
+        memcpy(p, lines.data(), bytes);
+        g_skelVb->Unlock();
+    }
+    g_skelVerts = (unsigned)(lines.size() / 3);
+}
+
+// Per vertex skinning: rebuild the vertex buffers from the animated bone
+// matrices. A vertex follows exactly one bone (that is what sub_B71290 stores),
+// so v' = (boneWorld[bone] * inverseBind[bone]) * v. DXG chunk 36 stores the
+// inverse bind matrices, so no separate bind data is needed.
+void UpdateSkinnedMeshes() {
+    if (g_bones.empty()) return;
+    for (auto& d : g_draws) {
+        if (!d.skinned || !d.vb || d.basePos.empty()) continue;
+        if (d.vbone.size() != d.basePos.size()) continue;
+        void* vp = nullptr;
+        if (FAILED(d.vb->Lock(0, 0, &vp, 0))) continue;
+        auto* base = (uint8_t*)vp;
+        for (size_t i = 0; i < d.basePos.size(); ++i) {
+            const DxgVec3 p = d.basePos[i];
+            DxgVec3 q = p;
+            DxgVec3 n = (i < d.baseNrm.size()) ? d.baseNrm[i] : DxgVec3{0.0f, 1.0f, 0.0f};
+            const int b = g_useSkin ? d.vbone[i] : -1;
+            if (b >= 0 && (size_t)b < g_bones.size() &&
+                g_boneWorld.size() >= ((size_t)b + 1) * 16) {
+                const float* aw = &g_boneWorld[(size_t)b * 16];
+                const float* ib = g_bones[(size_t)b].m;
+                float M[16];
+                for (int c = 0; c < 4; ++c) {
+                    for (int r = 0; r < 4; ++r) {
+                        M[c * 4 + r] = aw[0 * 4 + r] * ib[c * 4 + 0] +
+                                       aw[1 * 4 + r] * ib[c * 4 + 1] +
+                                       aw[2 * 4 + r] * ib[c * 4 + 2] +
+                                       aw[3 * 4 + r] * ib[c * 4 + 3];
+                    }
+                }
+                q.x = M[0] * p.x + M[4] * p.y + M[8] * p.z + M[12];
+                q.y = M[1] * p.x + M[5] * p.y + M[9] * p.z + M[13];
+                q.z = M[2] * p.x + M[6] * p.y + M[10] * p.z + M[14];
+                const float nx0 = n.x, ny0 = n.y, nz0 = n.z;
+                n.x = M[0] * nx0 + M[4] * ny0 + M[8] * nz0;
+                n.y = M[1] * nx0 + M[5] * ny0 + M[9] * nz0;
+                n.z = M[2] * nx0 + M[6] * ny0 + M[10] * nz0;
+                const float L = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
+                if (L > 1.0e-6f) {
+                    n.x /= L;
+                    n.y /= L;
+                    n.z /= L;
+                } else {
+                    n = DxgVec3{0.0f, 1.0f, 0.0f};
+                }
+                // safety: a skinned vertex must stay near where it was bound. If a
+                // bad bone index or matrix sends it far away, keep the bind vertex
+                // so the mesh cannot explode into flying triangles.
+                const float dx = q.x - p.x, dy = q.y - p.y, dz = q.z - p.z;
+                const float lim = (g_radius > 1.0f ? g_radius : 100.0f) * 2.0f;
+                if (dx * dx + dy * dy + dz * dz > lim * lim) {
+                    q = p;
+                    n = (i < d.baseNrm.size()) ? d.baseNrm[i] : DxgVec3{0.0f, 1.0f, 0.0f};
+                }
+            }
+            auto* v = (Vertex*)(base + i * kVertexStride);
+            v->x = q.x;
+            v->y = q.y;
+            v->z = q.z;
+            v->nx = n.x;
+            v->ny = n.y;
+            v->nz = n.z;
+        }
+        d.vb->Unlock();
+    }
+}
 
 void ReleaseDraws() {
     for (auto& d : g_draws) {
@@ -106,6 +321,86 @@ void Perspective(float fov, float aspect, float zn, float zf, Mat4& o) {
     o.m[11] = 1.0f;
     o.m[14] = -zn * zf / (zf - zn);
     o.m[15] = 0.0f;
+}
+
+void RotX(float a, Mat4& o) {
+    Ident(o);
+    const float c = cosf(a), s = sinf(a);
+    o.m[5] = c;
+    o.m[6] = s;
+    o.m[9] = -s;
+    o.m[10] = c;
+}
+
+void RotY(float a, Mat4& o) {
+    Ident(o);
+    const float c = cosf(a), s = sinf(a);
+    o.m[0] = c;
+    o.m[2] = -s;
+    o.m[8] = s;
+    o.m[10] = c;
+}
+
+void Translate(float x, float y, float z, Mat4& o) {
+    Ident(o);
+    o.m[12] = x;
+    o.m[13] = y;
+    o.m[14] = z;
+}
+
+// Update movement / attack timers. Returns delta time in seconds.
+float TickControl() {
+    const DWORD now = GetTickCount();
+    float dt = 0.016f;
+    if (g_lastTick) dt = (float)(now - g_lastTick) / 1000.0f;
+    g_lastTick = now;
+    if (dt > 0.1f) dt = 0.1f;
+
+    const float speed = g_radius * 1.6f;
+    float fwd = 0.0f, side = 0.0f;
+    if (g_keys['W']) fwd += 1.0f;
+    if (g_keys['S']) fwd -= 1.0f;
+    if (g_keys['A']) side -= 1.0f;
+    if (g_keys['D']) side += 1.0f;
+    if (fwd || side) {
+        const float len = sqrtf(fwd * fwd + side * side);
+        fwd /= len;
+        side /= len;
+        const float cf = cosf(g_facing), sf = sinf(g_facing);
+        g_moveX += (sf * fwd + cf * side) * speed * dt;
+        g_moveZ += (cf * fwd - sf * side) * speed * dt;
+        g_walkPhase += dt * 6.0f;
+        g_bob = sinf(g_walkPhase) * g_radius * 0.015f;
+    } else {
+        g_walkPhase = 0.0f;
+        g_bob *= 0.85f;
+    }
+    if (g_keys['Q']) g_facing -= 2.0f * dt;
+    if (g_keys['E']) g_facing += 2.0f * dt;
+    if (g_attack > 0.0f) {
+        g_attack -= dt;
+        if (g_attack < 0.0f) g_attack = 0.0f;
+    }
+    return dt;
+}
+
+// True when the given part should be drawn with the current weapon mode.
+bool WeaponVisible(const DrawMesh& d) {
+    if (!d.weapon) return true;
+    std::string low;
+    for (char c : d.name) low.push_back((char)(c >= 'A' && c <= 'Z' ? c + 32 : c));
+    const bool left = low.find("_02") != std::string::npos ||
+                      low.find("_04") != std::string::npos;
+    switch (g_weaponMode) {
+    case 0:
+        return true;
+    case 1:
+        return !left;
+    case 2:
+        return left;
+    default:
+        return false;
+    }
 }
 
 void LookAt(float ex, float ey, float ez, float cx, float cy, float cz, Mat4& o) {
@@ -312,12 +607,42 @@ bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* m
     d.nidx = (unsigned)src.idx.size();
     d.nverts = (unsigned)src.pos.size();
     d.tex = tex;
+    d.name = src.name;
+    {
+        float mn[3] = {1.0e9f, 1.0e9f, 1.0e9f};
+        float mx[3] = {-1.0e9f, -1.0e9f, -1.0e9f};
+        for (const auto& p : src.pos) {
+            for (int k = 0; k < 3; ++k) {
+                const float v = k == 0 ? p.x : (k == 1 ? p.y : p.z);
+                if (v < mn[k]) mn[k] = v;
+                if (v > mx[k]) mx[k] = v;
+            }
+        }
+        d.cx = (mn[0] + mx[0]) * 0.5f;
+        d.cy = (mn[1] + mx[1]) * 0.5f;
+        d.cz = (mn[2] + mx[2]) * 0.5f;
+    }
+    {
+        std::string low;
+        for (char c : src.name) low.push_back((char)(c >= 'A' && c <= 'Z' ? c + 32 : c));
+        d.weapon = low.find("saber") != std::string::npos ||
+                   low.find("gun") != std::string::npos ||
+                   low.find("rifle") != std::string::npos ||
+                   low.find("baz") != std::string::npos ||
+                   low.find("shield") != std::string::npos;
+    }
     if (mat) {
         d.twoSided = mat->twoSided;
         d.alphaTest = mat->alphaTest || mat->blend == "translucent";
         d.additive = mat->blend == "add";
         d.translucent = mat->blend == "translucent";
     }
+    // keep a bind pose copy so the vertices can be re-skinned every frame
+    d.basePos = src.pos;
+    d.baseNrm = src.nrm;
+    d.shapeBones = src.boneNames;
+    d.vertBone = src.vertBone;
+
     const UINT vbytes = (UINT)(src.pos.size() * kVertexStride);
     if (FAILED(g_dev->CreateVertexBuffer(vbytes, 0, g_fvf, D3DPOOL_MANAGED, &d.vb, nullptr)))
         return false;
@@ -371,31 +696,6 @@ bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* m
     return true;
 }
 
-void UploadSkeleton(const std::vector<DxgBone>& bones) {
-    if (!g_dev || bones.size() < 2) return;
-    std::vector<float> lines;
-    for (size_t i = 0; i < bones.size(); ++i) {
-        const int p = bones[i].parent;
-        if (p < 0 || p >= (int)bones.size()) continue;
-        lines.push_back(bones[(size_t)p].pos.x);
-        lines.push_back(bones[(size_t)p].pos.y);
-        lines.push_back(bones[(size_t)p].pos.z);
-        lines.push_back(bones[i].pos.x);
-        lines.push_back(bones[i].pos.y);
-        lines.push_back(bones[i].pos.z);
-    }
-    if (lines.empty()) return;
-    g_skelVerts = (unsigned)(lines.size() / 3);
-    const UINT bytes = (UINT)(lines.size() * sizeof(float));
-    if (FAILED(g_dev->CreateVertexBuffer(bytes, 0, D3DFVF_XYZ, D3DPOOL_MANAGED, &g_skelVb, nullptr)))
-        return;
-    void* p = nullptr;
-    if (SUCCEEDED(g_skelVb->Lock(0, bytes, &p, 0))) {
-        memcpy(p, lines.data(), bytes);
-        g_skelVb->Unlock();
-    }
-}
-
 void FitCamera(const DxgModel& model) {
     float mn[3] = {1.0e9f, 1.0e9f, 1.0e9f};
     float mx[3] = {-1.0e9f, -1.0e9f, -1.0e9f};
@@ -429,7 +729,9 @@ void FitCamera(const DxgModel& model) {
 
 bool Preview3D_Init(HWND hwnd) {
     g_hwnd = hwnd;
-    return CreateDevice();
+    if (!CreateDevice()) return false;
+    SetTimer(hwnd, 1, 16, nullptr);
+    return true;
 }
 
 void Preview3D_Shutdown() {
@@ -468,46 +770,13 @@ bool Preview3D_Load(const Preview3DInput& in) {
         if (!fallback) fallback = tex;
     }
 
-    auto meshBox = [](const DxgMesh& mesh, float mn[3], float mx[3]) {
-        mn[0] = mn[1] = mn[2] = 1.0e9f;
-        mx[0] = mx[1] = mx[2] = -1.0e9f;
-        for (const auto& p : mesh.pos) {
-            if (p.x < mn[0]) mn[0] = p.x;
-            if (p.y < mn[1]) mn[1] = p.y;
-            if (p.z < mn[2]) mn[2] = p.z;
-            if (p.x > mx[0]) mx[0] = p.x;
-            if (p.y > mx[1]) mx[1] = p.y;
-            if (p.z > mx[2]) mx[2] = p.z;
-        }
-    };
-    auto volOf = [](const float mn[3], const float mx[3]) {
-        const float a = (std::max)(1.0f, mx[0] - mn[0]);
-        const float b = (std::max)(1.0f, mx[1] - mn[1]);
-        const float c = (std::max)(1.0f, mx[2] - mn[2]);
-        return a * b * c;
-    };
-    int mainI = -1;
-    float bestVol = -1.0f;
-    for (int i = 0; i < (int)model.meshes.size(); ++i) {
-        const auto& mesh = model.meshes[(size_t)i];
-        if (mesh.lod1 || mesh.pos.empty()) continue;
-        float mn[3], mx[3];
-        meshBox(mesh, mn, mx);
-        float v = volOf(mn, mx);
-        if (mesh.name.find("GND_00") != std::string::npos) v *= 8.0f;
-        if (v > bestVol) {
-            bestVol = v;
-            mainI = i;
-        }
-    }
-    // Attachment parts (Hand_*, Saber_*, etc.) are parented to bones at runtime.
-    // Draw only the main skinned body shell until bone attachment is implemented.
+    // The decoder now produces real indexed geometry (LOD0 of every part), so all
+    // parts can be drawn directly - their vertex data is already in model space.
     DxgModel draw = model;
     draw.meshes.clear();
-    for (int i = 0; i < (int)model.meshes.size(); ++i) {
-        const auto& mesh = model.meshes[(size_t)i];
+    for (const auto& mesh : model.meshes) {
         if (mesh.lod1) continue;
-        if (mainI >= 0 && i != mainI) continue;
+        if (mesh.pos.empty() || mesh.idx.empty()) continue;
         draw.meshes.push_back(mesh);
     }
     if (draw.meshes.empty()) draw.meshes = model.meshes;
@@ -526,11 +795,57 @@ bool Preview3D_Load(const Preview3DInput& in) {
         }
         if (UploadMesh(mesh, tex, mat)) ++g_meshCount;
     }
-    g_boneCount = (unsigned)model.bones.size();
-    UploadSkeleton(model.bones);
+    g_bones = model.bones;
+    g_boneCount = (unsigned)g_bones.size();
+    for (auto& d : g_draws) {
+        // Per vertex skinning: resolve the shape bone palette against the
+        // skeleton by name. When that works the part must NOT also ride on a
+        // single bone, otherwise it would be transformed twice.
+        d.vbone.assign(d.basePos.size(), -1);
+        bool any = false;
+        if (d.vertBone.size() == d.basePos.size()) {
+            for (size_t i = 0; i < d.vertBone.size(); ++i) {
+                const size_t slot = d.vertBone[i];
+                if (slot >= d.shapeBones.size()) continue;
+                for (size_t b = 0; b < g_bones.size(); ++b) {
+                    if (g_bones[b].name == d.shapeBones[slot]) {
+                        d.vbone[i] = (int)b;
+                        any = true;
+                        break;
+                    }
+                }
+            }
+        }
+        d.skinned = any;
+        // the rigid binding stays available: it is used with skinning off
+        d.bone = FindBoneForPart(d.name, d.cx, d.cy, d.cz);
+    }
+    UpdateSkeletonVb();
     g_active = g_meshCount > 0;
     return g_active;
 }
+
+bool Preview3D_LoadMotion(const uint8_t* data, size_t size) {
+    g_animTime = 0.0f;
+    return g_motion.Parse(data, size);
+}
+
+bool Preview3D_HasMotion() { return g_motion.Valid(); }
+unsigned Preview3D_MotionDuration() {
+    return g_motion.Valid() ? g_motion.Duration() : 0u;
+}
+unsigned Preview3D_MotionBones() {
+    return g_motion.Valid() ? g_motion.nBones : 0u;
+}
+// How many parts could be attached to a bone (name match + bind pose distance).
+unsigned Preview3D_BoundParts() {
+    unsigned n = 0;
+    for (const auto& d : g_draws) {
+        if (d.bone >= 0) ++n;
+    }
+    return n;
+}
+unsigned Preview3D_PartCount() { return (unsigned)g_draws.size(); }
 
 bool Preview3D_Active() { return g_active && g_dev; }
 unsigned Preview3D_MeshCount() { return g_meshCount; }
@@ -584,12 +899,83 @@ void Preview3D_Render() {
                 g_dist + g_radius * 8.0f, proj);
     g_dev->SetTransform(D3DTS_VIEW, (D3DMATRIX*)view.m);
     g_dev->SetTransform(D3DTS_PROJECTION, (D3DMATRIX*)proj.m);
-    Mat4 world;
-    Ident(world);
+    const float dt = TickControl();
+
+    // drive the skeleton from the motion (bones not in the motion keep bind pose)
+    if (!g_bones.empty()) {
+        const float kNan = std::numeric_limits<float>::quiet_NaN();
+        std::vector<DxgVec3> local(g_bones.size(), DxgVec3{kNan, kNan, kNan});
+        std::vector<float> localRot(g_bones.size() * 4, kNan);
+        if (g_useBones && g_motion.Valid()) {
+            g_animTime += dt * 1000.0f;
+            std::vector<DxgVec3> mv;
+            std::vector<float> mr;
+            if (g_motion.Sample(g_animTime, mv, mr)) {
+                for (size_t b = 0; b < g_motion.boneNames.size() && b < mv.size(); ++b) {
+                    for (size_t i = 0; i < g_bones.size(); ++i) {
+                        if (g_bones[i].name == g_motion.boneNames[b]) {
+                            local[i] = mv[b];
+                            if (b * 4 + 3 < mr.size()) {
+                                for (int k = 0; k < 4; ++k)
+                                    localRot[i * 4 + k] = mr[b * 4 + k];
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        BuildBoneWorld(g_bones, local, localRot, g_boneWorld);
+        UpdateSkeletonVb();
+        UpdateSkinnedMeshes();
+    }
+
+    Mat4 world, spin, move;
+    RotY(g_facing, spin);
+    Translate(g_moveX, g_bob, g_moveZ, move);
+    Mul(move, spin, world);
     g_dev->SetTransform(D3DTS_WORLD, (D3DMATRIX*)world.m);
+
+    // shoulder height used as pivot for the weapon swing
+    const float shoulderY = g_cy + g_radius * 0.55f;
 
     auto drawOne = [&](const DrawMesh& d, bool transparent) {
         if (!d.vb || !d.ib || d.nidx < 3) return;
+        if (!WeaponVisible(d)) return;
+        bool customWorld = false;
+        Mat4 base = world;
+        // part rides on a bone: world * animWorld * inverseBind
+        // with per vertex skinning on, the vertices are already in model space
+        const bool skinActive = d.skinned && g_useSkin;
+        if (g_useBones && !skinActive && d.bone >= 0 && (size_t)d.bone < g_bones.size() &&
+            g_boneWorld.size() >= ((size_t)d.bone + 1) * 16) {
+            Mat4 aw, ib, tmp;
+            memcpy(aw.m, &g_boneWorld[(size_t)d.bone * 16], 64);
+            memcpy(ib.m, g_bones[(size_t)d.bone].m, 64);
+            Mul(aw, ib, tmp);
+            // at bind pose tmp is the identity; if the bone world matrix is wrong
+            // for this file the translation explodes - ignore the binding then
+            const float tx = tmp.m[12], ty = tmp.m[13], tz = tmp.m[14];
+            const float lim = (g_radius > 1.0f ? g_radius : 100.0f) * 0.75f;
+            if (tx * tx + ty * ty + tz * tz <= lim * lim) {
+                Mul(world, tmp, base);
+                customWorld = true;
+            }
+        }
+        Mat4 dw = base;
+        if (d.weapon && g_attack > 0.0f) {
+            const float t = 1.0f - g_attack / kAttackDur;       // 0..1
+            const float ang = 1.15f - 2.6f * t;                 // swing down
+            Mat4 rx, up, down, tmp1, tmp2;
+            RotX(ang, rx);
+            Translate(0.0f, -shoulderY, 0.0f, down);
+            Translate(0.0f, shoulderY, 0.0f, up);
+            Mul(down, rx, tmp1);
+            Mul(tmp1, up, tmp2);
+            Mul(base, tmp2, dw);
+            customWorld = true;
+        }
+        if (customWorld) g_dev->SetTransform(D3DTS_WORLD, (D3DMATRIX*)dw.m);
         const bool isT = d.translucent || d.additive;
         if (isT != transparent) return;
         g_dev->SetStreamSource(0, d.vb, 0, kVertexStride);
@@ -618,6 +1004,7 @@ void Preview3D_Render() {
             g_dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
         }
         g_dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, d.nverts, 0, d.nidx / 3);
+        if (customWorld) g_dev->SetTransform(D3DTS_WORLD, (D3DMATRIX*)world.m);
     };
     for (const auto& d : g_draws) drawOne(d, false);
     for (const auto& d : g_draws) drawOne(d, true);
@@ -658,11 +1045,47 @@ LRESULT Preview3D_WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         g_drag = true;
         g_last.x = LOWORD(l);
         g_last.y = HIWORD(l);
+        g_down.x = g_last.x;
+        g_down.y = g_last.y;
         SetCapture(hwnd);
+        SetFocus(hwnd);
         return 0;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONUP: {
+        const int dx = (int)(short)LOWORD(l) - g_down.x;
+        const int dy = (int)(short)HIWORD(l) - g_down.y;
         g_drag = false;
         ReleaseCapture();
+        if (dx * dx + dy * dy < 25) g_attack = kAttackDur;  // click = attack
+        Preview3D_Render();
+        return 0;
+    }
+    case WM_KEYDOWN: {
+        const unsigned k = (unsigned)w & 0xFF;
+        if (k < 256) g_keys[k] = true;
+        if (k >= '1' && k <= '4') {
+            g_weaponMode = (int)(k - '1');
+            Preview3D_Render();
+        }
+        if (k == 'B' || k == 'b') {
+            g_useBones = !g_useBones;
+            Preview3D_Render();
+        }
+        if (k == 'M' || k == 'm') {
+            g_useSkin = !g_useSkin;
+            Preview3D_Render();
+        }
+        return 0;
+    }
+    case WM_KEYUP: {
+        const unsigned k = (unsigned)w & 0xFF;
+        if (k < 256) g_keys[k] = false;
+        return 0;
+    }
+    case WM_TIMER:
+        if (g_active) Preview3D_Render();
+        return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd, 1);
         return 0;
     case WM_MOUSEMOVE:
         if (g_drag) {

@@ -1,103 +1,82 @@
 #include "dxg.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// GundamOnline .dxg model decoder.
+//
+// Layout recovered from GundamOnline_unpacked.exe (rhyme engine):
+//   sub_B71290 / sub_B71810  - mesh chunk decoder (rymDX9GMesh)
+//   sub_B7AED0               - mesh block walk      : next   += *(u32*)(p+8) + 28
+//   sub_B7ADC0               - shape walk           : next   += *(u32*)(s+12) + 16
+//   sub_B521F10              - vertex records       : s + 16            (10 B each)
+//   sub_B7ACA0               - face index buffer    : s + 16 + 10*nVerts (6 B per face)
+//   sub_B7ADF0 / B7AE10 / B7AE30 / B7AE50 / B7AE70 / B7AE90
+//                            - position / normal / uv0 / uv1 / extra / weight arrays
+//   sub_B6FB70               - rymDX9GMesh::init (array strides: pos 12B file -> 16B,
+//                              normal 12B, uv 8B, extra 4B, weights 4B)
+//
+// Chunk (type 1) payload:
+//   +4  u8   shape count (LOD chain: shape 0 = LOD0)
+//   +8  u32  block size   (next mesh block:  p + size + 28)
+//   +12 u16  nPos
+//   +14 u16  nNrm
+//   +16 u16  nUv0
+//   +18 u16  nUv1
+//   +20 u16  nExtra
+//   +24 u32  nWeights (float count)
+//   +28 shape[0]
+//        shape header (16 bytes):
+//          +0  u16 nVerts
+//          +2  u16 nFaces
+//          +8  u32 (extra data size)
+//          +12 u32 block size    (next shape: s + size + 16)
+//          +16 vertex records: nVerts * u16[5] = (pos, nrm, uv0, uv1, extra),
+//                              0xFFFF = unused slot
+//          +16 + 10*nVerts : face indices, nFaces * u16[3]
+//   after the last shape:
+//        pos[nPos] (float3) | nrm[nNrm] (float3) | uv0[nUv0] (float2)
+//        | uv1[nUv1] (float2) | extra[nExtra] (u32) | weights[nWeights] (float)
+// ---------------------------------------------------------------------------
+
 namespace {
 
-constexpr uint32_t kTypSkinned = 26;  // cmp eax, 0x1A @ 0x86A008
-constexpr int kTyp26PosExtra = 190;   // o2 + nverts*4 + 190 -> VB (GND_00 sample)
+constexpr uint16_t kUnused = 0xFFFF;
 
-int Align4(int x) { return (x + 3) & ~3; }
+uint16_t Rd16(const uint8_t* p) {
+    uint16_t v;
+    memcpy(&v, p, 2);
+    return v;
+}
+
+uint32_t Rd32(const uint8_t* p) {
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+float Rdf(const uint8_t* p) {
+    float v;
+    memcpy(&v, p, 4);
+    return v;
+}
 
 bool Finite3(float x, float y, float z) {
     return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
            fabsf(x) < 1.0e6f && fabsf(y) < 1.0e6f && fabsf(z) < 1.0e6f;
 }
 
-bool NearZeroVert(const DxgVec3& p) {
-    return fabsf(p.x) + fabsf(p.y) + fabsf(p.z) < 0.75f;
-}
-
-bool LooksUnitNrm(const DxgVec3& p) {
-    const float L = sqrtf(p.x * p.x + p.y * p.y + p.z * p.z);
-    return L > 0.75f && L < 1.25f &&
-           fabsf(p.x) < 1.3f && fabsf(p.y) < 1.3f && fabsf(p.z) < 1.3f;
-}
-
-void ReadPos(const uint8_t* data, int off, int count, std::vector<DxgVec3>& out) {
-    out.resize((size_t)count);
-    for (int i = 0; i < count; ++i)
-        memcpy(&out[(size_t)i], data + off + (size_t)i * 12u, 12);
-}
-
-void ReadNrmAfterPos(const uint8_t* data, size_t len, int posOff, int nverts,
-                     std::vector<DxgVec3>& nrm) {
-    nrm.assign((size_t)nverts, {0, 1, 0});
-    const size_t posEnd = (size_t)posOff + (size_t)nverts * 12u;
-    if (posEnd + (size_t)nverts * 12u > len) return;
-    int ok = 0;
-    for (int i = 0; i < nverts; ++i) {
-        float x, y, z;
-        memcpy(&x, data + posEnd + (size_t)i * 12u, 4);
-        memcpy(&y, data + posEnd + (size_t)i * 12u + 4, 4);
-        memcpy(&z, data + posEnd + (size_t)i * 12u + 8, 4);
-        if (!Finite3(x, y, z)) return;
-        const float L = sqrtf(x * x + y * y + z * z);
-        if (L > 0.5f && L < 1.5f) ++ok;
-        nrm[(size_t)i] = {x, y, z};
-    }
-    if (ok < nverts / 2) nrm.clear();
-}
-
-void ReadUvAfterPos(const uint8_t* data, size_t len, int posOff, int nverts,
-                    std::vector<DxgVec2>& uv) {
-    uv.clear();
-    if (nverts <= 0 || posOff < 0) return;
-    const size_t uvOff = (size_t)posOff + (size_t)nverts * 12u;
-    if (uvOff + (size_t)nverts * 8u > len) return;
-    uv.resize((size_t)nverts);
-    int ok = 0;
-    for (int i = 0; i < nverts; ++i) {
-        float u = 0, v = 0;
-        memcpy(&u, data + uvOff + (size_t)i * 8u, 4);
-        memcpy(&v, data + uvOff + (size_t)i * 8u + 4, 4);
-        if (!std::isfinite(u) || !std::isfinite(v)) {
-            uv.clear();
-            return;
-        }
-        if (u >= -0.05f && u <= 8.0f && v >= -0.05f && v <= 8.0f) ++ok;
-        uv[(size_t)i] = {u, v};
-    }
-    if (ok < nverts / 2) uv.clear();
-}
-
-void MakeBoxUv(const std::vector<DxgVec3>& pos, std::vector<DxgVec2>& uv) {
-    if (pos.empty()) return;
-    float mn[3] = {1.0e9f, 1.0e9f, 1.0e9f};
-    float mx[3] = {-1.0e9f, -1.0e9f, -1.0e9f};
-    for (const auto& p : pos) {
-        if (p.x < mn[0]) mn[0] = p.x;
-        if (p.y < mn[1]) mn[1] = p.y;
-        if (p.z < mn[2]) mn[2] = p.z;
-        if (p.x > mx[0]) mx[0] = p.x;
-        if (p.y > mx[1]) mx[1] = p.y;
-        if (p.z > mx[2]) mx[2] = p.z;
-    }
-    const float dx = (std::max)(0.001f, mx[0] - mn[0]);
-    const float dy = (std::max)(0.001f, mx[1] - mn[1]);
-    uv.resize(pos.size());
-    for (size_t i = 0; i < pos.size(); ++i) {
-        uv[i].u = (pos[i].x - mn[0]) / dx;
-        uv[i].v = 1.0f - (pos[i].y - mn[1]) / dy;
-    }
+bool LooksLod1(const std::string& name) {
+    if (name.find("_GND_01") != std::string::npos) return true;
+    if (name.find("_LOD1") != std::string::npos || name.find("_lod1") != std::string::npos) return true;
+    return false;
 }
 
 void FaceNormals(DxgMesh& m) {
-    m.nrm.assign(m.pos.size(), {});
+    m.nrm.assign(m.pos.size(), DxgVec3{});
     for (size_t i = 0; i + 2 < m.idx.size(); i += 3) {
         const uint32_t ia = m.idx[i], ib = m.idx[i + 1], ic = m.idx[i + 2];
         if (ia >= m.pos.size() || ib >= m.pos.size() || ic >= m.pos.size()) continue;
@@ -129,251 +108,183 @@ void FaceNormals(DxgMesh& m) {
     }
 }
 
-bool LooksLod1(const std::string& name, uint16_t nFaces) {
-    if (name.find("_GND_01") != std::string::npos) return true;
-    if (name.find("_LOD1") != std::string::npos || name.find("_lod1") != std::string::npos) return true;
-    if (name.size() > 4 && name.compare(name.size() - 4, 4, "_01") == 0 &&
-        name.find("GND") != std::string::npos && nFaces <= 16)
-        return true;
-    return false;
-}
+// Flatten one shape into a renderable mesh (LOD0 only).
+bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint16_t nPos,
+                const uint8_t* nrmArr, uint16_t nNrm, const uint8_t* uvArr, uint16_t nUv,
+                const std::string& name, const std::vector<DxgBone>& skel,
+                DxgMesh& out) {
+    if (avail < 28) return false;
+    const uint16_t nVerts = Rd16(shape);
+    const uint16_t nFaces = Rd16(shape + 2);
+    if (nVerts == 0 || nFaces == 0) return false;
+    const size_t need = 16u + (size_t)nVerts * 10u + (size_t)nFaces * 6u;
+    if (need > avail) return false;
 
-int PosOffset(uint32_t typ, int o2, int headerVerts) {
-    if (typ == kTypSkinned)
-        return Align4(o2 + headerVerts * 4 + kTyp26PosExtra);
-    return Align4(o2);
-}
+    const uint8_t* rec = shape + 16;
+    const uint8_t* ib = rec + (size_t)nVerts * 10u;
 
-// Game loader (GundamOnline_unpacked.exe): scan [o1,o2) in 2-byte steps for the first
-// contiguous nidx x u16 run with no 0xFFFF separator. VB vertex count = max(IB)+1.
-bool FindGameIndexBuffer(const uint8_t* data, int o1, int o2, int nidx, int& ibOff,
-                         int& maxIdx) {
-    if (o1 < 0 || o2 <= o1 || nidx < 3) return false;
-    ibOff = -1;
-    maxIdx = -1;
-    for (int st = o1; st + nidx * 2 <= o2; st += 2) {
-        int mx = 0;
-        bool ok = true;
-        for (int k = 0; k < nidx; ++k) {
-            uint16_t v = 0;
-            memcpy(&v, data + st + k * 2, 2);
-            if (v == 0xFFFF) {
-                ok = false;
-                break;
+    out.name = name;
+    out.nVerts = nVerts;
+    out.nFaces = nFaces;
+    out.lod1 = LooksLod1(name);
+    out.pos.assign(nVerts, DxgVec3{});
+    out.nrm.assign(nVerts, DxgVec3{});
+    out.uv.assign(nVerts, DxgVec2{});
+
+    bool anyNrm = false;
+    for (uint16_t i = 0; i < nVerts; ++i) {
+        const uint8_t* r = rec + (size_t)i * 10u;
+        const uint16_t ip = Rd16(r);
+        const uint16_t in = Rd16(r + 2);
+        const uint16_t iu = Rd16(r + 4);
+
+        if (ip != kUnused && ip < nPos) {
+            const uint8_t* p = posArr + (size_t)ip * 12u;
+            DxgVec3 v{Rdf(p), Rdf(p + 4), Rdf(p + 8)};
+            if (Finite3(v.x, v.y, v.z)) out.pos[i] = v;
+        }
+        if (in != kUnused && in < nNrm) {
+            const uint8_t* p = nrmArr + (size_t)in * 12u;
+            DxgVec3 v{Rdf(p), Rdf(p + 4), Rdf(p + 8)};
+            if (Finite3(v.x, v.y, v.z)) {
+                out.nrm[i] = v;
+                anyNrm = true;
             }
-            if ((int)v > mx) mx = (int)v;
         }
-        if (!ok) continue;
-        ibOff = st;
-        maxIdx = mx;
-        return true;
-    }
-    return false;
-}
-
-void CompactMesh(DxgMesh& m) {
-    if (m.idx.empty() || m.pos.empty()) return;
-    std::vector<uint32_t> used;
-    used.reserve(m.idx.size());
-    for (uint32_t i : m.idx) {
-        if (i < m.pos.size()) used.push_back(i);
-    }
-    std::sort(used.begin(), used.end());
-    used.erase(std::unique(used.begin(), used.end()), used.end());
-    if (used.size() == m.pos.size()) return;
-    std::vector<DxgVec3> pos(used.size());
-    std::vector<DxgVec3> nrm;
-    std::vector<DxgVec2> uv;
-    if (m.nrm.size() == m.pos.size()) nrm.resize(used.size());
-    if (m.uv.size() == m.pos.size()) uv.resize(used.size());
-    std::vector<uint32_t> remap(m.pos.size(), UINT32_MAX);
-    for (size_t i = 0; i < used.size(); ++i) {
-        const uint32_t old = used[i];
-        remap[old] = (uint32_t)i;
-        pos[i] = m.pos[old];
-        if (!nrm.empty()) nrm[i] = m.nrm[old];
-        if (!uv.empty()) uv[i] = m.uv[old];
-    }
-    for (uint32_t& idx : m.idx) {
-        if (idx < remap.size()) idx = remap[idx];
-    }
-    m.pos = std::move(pos);
-    if (!nrm.empty()) m.nrm = std::move(nrm);
-    if (!uv.empty()) m.uv = std::move(uv);
-}
-
-void BuildTriangles(const uint16_t* idx, int nidx, int nv, const std::vector<DxgVec3>& pos,
-                    std::vector<uint32_t>& out) {
-    out.clear();
-    out.reserve((size_t)nidx);
-    for (int i = 0; i + 2 < nidx; i += 3) {
-        const uint32_t a = idx[i];
-        const uint32_t b = idx[i + 1];
-        const uint32_t c = idx[i + 2];
-        if (a >= (uint32_t)nv || b >= (uint32_t)nv || c >= (uint32_t)nv) continue;
-        if (a == b || b == c || a == c) continue;
-        if (!pos.empty()) {
-            const DxgVec3& pa = pos[a];
-            const DxgVec3& pb = pos[b];
-            const DxgVec3& pc = pos[c];
-            if (!Finite3(pa.x, pa.y, pa.z) || !Finite3(pb.x, pb.y, pb.z) || !Finite3(pc.x, pc.y, pc.z))
-                continue;
-            if (NearZeroVert(pa) || NearZeroVert(pb) || NearZeroVert(pc)) continue;
-            DxgVec3 e1{pb.x - pa.x, pb.y - pa.y, pb.z - pa.z};
-            DxgVec3 e2{pc.x - pa.x, pc.y - pa.y, pc.z - pa.z};
-            DxgVec3 n{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
-            const float area2 = n.x * n.x + n.y * n.y + n.z * n.z;
-            if (area2 < 1.0e-12f) continue;
+        if (iu != kUnused && iu < nUv) {
+            const uint8_t* p = uvArr + (size_t)iu * 8u;
+            out.uv[i] = DxgVec2{Rdf(p), Rdf(p + 4)};
         }
-        out.push_back(a);
-        out.push_back(b);
-        out.push_back(c);
-    }
-}
-
-bool TryPackedMesh(const uint8_t* data, size_t dlen, int o2, int nFaces, DxgMesh& m) {
-    if (nFaces <= 0 || o2 < 0) return false;
-    const int packed = nFaces * 3;
-    int posOff = o2;
-    if ((size_t)posOff + 16u + (size_t)packed * 12u <= dlen) {
-        bool hdrZero = true;
-        for (int k = 0; k < 16; k += 4) {
-            float f = 0;
-            memcpy(&f, data + posOff + k, 4);
-            if (fabsf(f) > 1.0e-4f) hdrZero = false;
-        }
-        if (hdrZero) posOff += 16;
-    }
-    if ((size_t)posOff + (size_t)packed * 12u > dlen) return false;
-    for (int i = 0; i < packed; ++i) {
-        float x, y, z;
-        memcpy(&x, data + posOff + (size_t)i * 12u, 4);
-        memcpy(&y, data + posOff + (size_t)i * 12u + 4, 4);
-        memcpy(&z, data + posOff + (size_t)i * 12u + 8, 4);
-        if (!Finite3(x, y, z)) return false;
-    }
-    ReadPos(data, posOff, packed, m.pos);
-    m.idx.resize((size_t)packed);
-    for (int i = 0; i < packed; ++i) m.idx[(size_t)i] = (uint32_t)i;
-    return !m.pos.empty();
-}
-
-void ParseMeshPayload(const uint8_t* pl, size_t sz, const std::string& name, DxgMesh& m,
-                      std::vector<std::pair<int, DxgVec3>>* skinAcc) {
-    if (sz < 28) return;
-    uint32_t flags = 0, nidx = 0;
-    uint16_t nFaces = 0, nVerts = 0;
-    memcpy(&flags, pl + 4, 4);
-    memcpy(&nFaces, pl + 12, 2);
-    memcpy(&nVerts, pl + 14, 2);
-    memcpy(&nidx, pl + 24, 4);
-    const uint8_t* data = pl + 28;
-    const size_t dlen = sz - 28;
-    m.name = name;
-    m.flags = flags;
-    m.nFaces = nFaces;
-    m.nVerts = nVerts;
-    m.lod1 = LooksLod1(name, nFaces);
-    if (dlen < 16 || nFaces == 0) return;
-    if (name.find("decal") != std::string::npos && nVerts <= 3) return;
-
-    uint16_t a = 0, b = 0;
-    uint32_t typ = 0, o1 = 0, o2 = 0;
-    memcpy(&a, data, 2);
-    memcpy(&b, data + 2, 2);
-    memcpy(&typ, data + 4, 4);
-    memcpy(&o1, data + 8, 4);
-    memcpy(&o2, data + 12, 4);
-    (void)a;
-    (void)b;
-
-    if (nidx < 3) {
-        if (TryPackedMesh(data, dlen, (int)o2, (int)nFaces, m)) {
-            FaceNormals(m);
-            MakeBoxUv(m.pos, m.uv);
-        }
-        return;
     }
 
-    int ibOff = -1, maxIdx = -1;
-    if (!FindGameIndexBuffer(data, (int)o1, (int)o2, (int)nidx, ibOff, maxIdx)) {
-        if (TryPackedMesh(data, dlen, (int)o2, (int)nFaces, m)) {
-            FaceNormals(m);
-            MakeBoxUv(m.pos, m.uv);
-        }
-        return;
+    out.idx.clear();
+    out.idx.reserve((size_t)nFaces * 3u);
+    for (uint32_t f = 0; f < (uint32_t)nFaces * 3u; ++f) {
+        const uint16_t v = Rd16(ib + (size_t)f * 2u);
+        if (v >= nVerts) continue;
+        out.idx.push_back(v);
     }
+    out.idx.resize(out.idx.size() - (out.idx.size() % 3));
+    if (out.idx.empty()) return false;
 
-    const int nv = maxIdx + 1;
-    const int posOff = PosOffset(typ, (int)o2, (int)nVerts);
-    if (posOff < 0 || nv <= 0 || (size_t)posOff + (size_t)nv * 12u > dlen) return;
-
-    ReadPos(data, posOff, nv, m.pos);
-    const uint16_t* ib = (const uint16_t*)(data + ibOff);
-    BuildTriangles(ib, (int)nidx, nv, m.pos, m.idx);
-    if (m.idx.empty()) return;
-
-    // typ=26: pos block is followed by float2 UV, then skin weights — not normals.
-    FaceNormals(m);
-    ReadUvAfterPos(data, dlen, posOff, nv, m.uv);
-    if (m.uv.size() != m.pos.size())
-        MakeBoxUv(m.pos, m.uv);
-    CompactMesh(m);
-
-    if (skinAcc && !m.pos.empty() && o1 > 0 && ibOff > o1) {
-        const auto* skin = (const uint16_t*)(data + o1);
-        const int nSkin = (ibOff - (int)o1) / 2;
-        std::vector<uint16_t> g;
-        for (int i = 0; i < nSkin; ++i) {
-            const uint16_t v = skin[i];
-            if (v == 0xFFFF) {
-                if (g.size() >= 4 && g[0] == 0 && g[2] == 0) {
-                    const uint16_t bone = g[1];
-                    const uint16_t vert = g[3];
-                    if (vert < m.pos.size())
-                        skinAcc->push_back({(int)bone, m.pos[vert]});
+    // ---- skinning data -----------------------------------------------------
+    // sub_B71290 reads a bone name table at shape+4 (count, <= 26) and a per
+    // vertex u16 bone index. Both live in the shape tail; locate them by content
+    // instead of a fixed offset.
+    out.boneNames.clear();
+    out.vertBone.clear();
+    const uint8_t nc = shape[4];
+    if (nc > 0 && nc <= 26) {
+        // Exact layout from the loader (sub_B7ACB0 / sub_B7ACD0):
+        //   [shape+16 .. ] vertex records   10 * nVerts
+        //   [.. ]         index buffer      6  * nFaces
+        //   [.. ]         u32 paletteSize
+        //   [.. ]         paletteSize bytes of zero separated bone names
+        //   [.. ]         u16 bone index per vertex
+        const size_t ibRel = 16u + (size_t)nVerts * 10u + (size_t)nFaces * 6u;
+        if (ibRel + 4 <= avail) {
+            const uint32_t tblSize = Rd32(shape + ibRel);
+            const size_t tblOff = ibRel + 4;
+            if (tblSize > 0 && tblOff + tblSize <= avail) {
+                size_t p = tblOff;
+                const size_t end = tblOff + tblSize;
+                std::vector<std::string> cand;
+                bool ok = true;
+                for (int i = 0; i < nc; ++i) {
+                    if (p >= end) { ok = false; break; }
+                    const size_t s = p;
+                    while (p < end && shape[p] != 0) ++p;
+                    if (p == s) { ok = false; break; }
+                    cand.push_back(std::string((const char*)shape + s, p - s));
+                    ++p;
                 }
-                g.clear();
-            } else {
-                g.push_back(v);
-                if (g.size() > 8) g.clear();
+                if (ok) {
+                    // keep it only when the names really are skeleton bones
+                    bool all = true;
+                    for (const auto& n : cand) {
+                        bool found = false;
+                        for (const auto& b : skel) {
+                            if (b.name == n) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            all = false;
+                            break;
+                        }
+                    }
+                    if (all) out.boneNames = cand;
+                }
             }
+            if (!out.boneNames.empty()) {
+                const size_t boneOff = tblOff + tblSize;
+                if (boneOff + 2u * (size_t)nVerts <= avail) {
+                    // Tolerate a few stray entries: clamp them to the first bone
+                    // instead of throwing the whole array away (that would leave
+                    // the shape frozen in bind pose).
+                    out.vertBone.resize(nVerts);
+                    for (uint16_t i = 0; i < nVerts; ++i) {
+                        const uint16_t v = Rd16(shape + boneOff + 2u * i);
+                        out.vertBone[i] = (v < out.boneNames.size()) ? v : 0;
+                    }
+                }
+            }
+            if (out.vertBone.empty()) out.vertBone.assign(nVerts, 0);
         }
     }
+
+    if (!anyNrm) FaceNormals(out);
+    return true;
 }
 
+// Skeleton chunk (type 36):
+//   +0        u32  nameBytes
+//   +4        char[nameBytes]  zero separated bone names
+//   +4+nlen   per bone: u8 idx, u8 parent, u8 child, u8 sibling   (0xFF = none)
+//   then      per bone: float[16] bind pose matrix (model space)
 void ParseSkeleton(const uint8_t* pl, size_t sz, std::vector<DxgBone>& bones) {
     if (sz < 8) return;
-    uint32_t nlen = 0;
-    memcpy(&nlen, pl, 4);
+    const uint32_t nlen = Rd32(pl);
     if (nlen > sz - 4) return;
     std::vector<std::string> names;
-    size_t i = 4;
     std::string cur;
-    while (i < 4 + nlen && i < sz) {
-        if (pl[i] == 0) {
+    for (uint32_t i = 0; i < nlen; ++i) {
+        const uint8_t c = pl[4 + i];
+        if (c == 0) {
             if (!cur.empty()) names.push_back(cur);
             cur.clear();
-        } else if (pl[i] >= 32 && pl[i] < 127) {
-            cur.push_back((char)pl[i]);
+        } else if (c >= 32 && c < 127) {
+            cur.push_back((char)c);
         }
-        ++i;
     }
     if (!cur.empty()) names.push_back(cur);
     if (names.empty()) return;
-    bones.resize(names.size());
-    for (size_t bi = 0; bi < names.size(); ++bi) {
-        bones[bi].name = names[bi];
-        bones[bi].parent = -1;
+
+    const size_t n = names.size();
+    const uint8_t* hier = pl + 4 + nlen;
+    const size_t left = sz - (4 + nlen);
+    if (left < n * 4) return;
+
+    bones.clear();
+    bones.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        bones[i].name = names[i];
+        const uint8_t* h = hier + 4 * i;
+        auto idx = [](uint8_t v) { return v == 0xFF ? -1 : (int)v; };
+        bones[i].parent = idx(h[1]);
+        bones[i].child = idx(h[2]);
+        bones[i].sibling = idx(h[3]);
     }
-    const uint8_t* rest = pl + 4 + nlen;
-    const size_t rlen = sz - (4 + nlen);
-    const int n = (int)bones.size();
-    for (size_t k = 0; k + 1 < rlen; ++k) {
-        const int a = rest[k];
-        const int p = rest[k + 1];
-        if (a > 0 && a < n && p >= 0 && p < n && p < a && bones[(size_t)a].parent < 0)
-            bones[(size_t)a].parent = p;
+
+    const uint8_t* mats = hier + n * 4;
+    if (left >= n * 4 + n * 64) {
+        for (size_t i = 0; i < n; ++i) {
+            memcpy(bones[i].m, mats + 64 * i, 64);
+            bones[i].pos = DxgVec3{bones[i].m[12], bones[i].m[13], bones[i].m[14]};
+        }
+    } else {
+        // fall back: keep hierarchy only
     }
 }
 
@@ -435,19 +346,17 @@ void LayoutBones(std::vector<DxgBone>& bones, const std::vector<DxgMesh>& meshes
 
 }  // namespace
 
-bool DxgModel::Parse(const uint8_t* data, size_t size) {
+bool DxgModel::Parse(const uint8_t* d, size_t size) {
     names.clear();
     meshes.clear();
     bones.clear();
-    if (!data || size < 28) return false;
-    if (memcmp(data, "DXG ", 4) != 0) return false;
-    uint32_t nameBytes = 0;
-    memcpy(&nameBytes, data + 20, 4);
+    if (!d || size < 32 || memcmp(d, "DXG ", 4) != 0) return false;
+    const uint32_t nameBytes = Rd32(d + 20);
     if (nameBytes > size - 24) return false;
     {
         std::string cur;
         for (uint32_t i = 0; i < nameBytes; ++i) {
-            const char c = (char)data[24 + i];
+            const char c = (char)d[24 + i];
             if (c == 0) {
                 if (!cur.empty()) names.push_back(cur);
                 cur.clear();
@@ -458,21 +367,68 @@ bool DxgModel::Parse(const uint8_t* data, size_t size) {
         if (!cur.empty()) names.push_back(cur);
     }
 
+    // Skeleton first: BuildShape validates every shape's bone palette against the
+    // bone list, so the bones must be known before the meshes are parsed.
+    {
+        size_t so = 24 + nameBytes;
+        while (so + 8 <= size) {
+            const uint32_t csz = Rd32(d + so + 4);
+            if (so + 8 + csz > size) break;
+            if (Rd32(d + so) == 36) ParseSkeleton(d + so + 8, csz, bones);
+            so += 8 + (size_t)csz;
+        }
+    }
+
     size_t off = 24 + nameBytes;
     size_t nameI = 0;
-    std::vector<std::pair<int, DxgVec3>> skinAcc;
     while (off + 8 <= size) {
-        uint32_t typ = 0, csz = 0;
-        memcpy(&typ, data + off, 4);
-        memcpy(&csz, data + off + 4, 4);
+        const uint32_t typ = Rd32(d + off);
+        const uint32_t csz = Rd32(d + off + 4);
         if (off + 8 + csz > size) break;
-        const uint8_t* pl = data + off + 8;
-        if (typ == 1) {
-            DxgMesh mesh;
-            std::string nm = nameI < names.size() ? names[nameI] : ("mesh" + std::to_string(nameI));
-            ++nameI;
-            ParseMeshPayload(pl, csz, nm, mesh, &skinAcc);
-            if (!mesh.pos.empty() && !mesh.idx.empty()) meshes.push_back(std::move(mesh));
+        const uint8_t* pl = d + off + 8;
+        if (typ == 1 && csz >= 28) {
+            const uint8_t* p = pl;
+            const uint8_t* pend = pl + csz;
+            while (p + 28 <= pend) {
+                const uint8_t nShapes = p[4];
+                const uint32_t blockSize = Rd32(p + 8);
+                const uint16_t nPos = Rd16(p + 12);
+                const uint16_t nNrm = Rd16(p + 14);
+                const uint16_t nUv0 = Rd16(p + 16);
+                const uint32_t nW = Rd32(p + 24);
+
+                // Walk the shape (LOD) chain; attribute arrays follow the last one.
+                const uint8_t* sh = p + 28;
+                std::vector<const uint8_t*> shapes;
+                for (uint32_t si = 0; si < nShapes; ++si) {
+                    if (sh + 16 > pend) break;
+                    shapes.push_back(sh);
+                    const uint32_t sb = Rd32(sh + 12);
+                    sh += (size_t)sb + 16u;
+                }
+                const uint8_t* posArr = sh;
+                const uint8_t* nrmArr = posArr + (size_t)nPos * 12u;
+                const uint8_t* uvArr = nrmArr + (size_t)nNrm * 12u;
+                (void)nUv0;
+                (void)nW;
+
+                // Every shape is a sub-mesh of the part (e.g. GND_00 keeps the body in
+                // shape 0 and the right leg in shape 1); they are NOT LOD levels.
+                if (!shapes.empty() && posArr <= pend) {
+                    std::string nm = nameI < names.size() ? names[nameI]
+                                                          : ("mesh" + std::to_string(nameI));
+                    for (const uint8_t* shape : shapes) {
+                        DxgMesh m;
+                        const size_t avail = (size_t)(pend - shape);
+                        if (BuildShape(shape, avail, posArr, nPos, nrmArr, nNrm, uvArr, nUv0,
+                                       nm, bones, m))
+                            meshes.push_back(std::move(m));
+                    }
+                }
+                ++nameI;
+                if (blockSize == 0) break;
+                p += (size_t)blockSize + 28u;
+            }
         } else if (typ == 36) {
             ParseSkeleton(pl, csz, bones);
         }
@@ -480,31 +436,13 @@ bool DxgModel::Parse(const uint8_t* data, size_t size) {
         if (typ == 0 && csz == 0) break;
     }
 
-    if (!bones.empty() && !skinAcc.empty()) {
-        std::vector<DxgVec3> acc(bones.size());
-        std::vector<int> cnt(bones.size(), 0);
-        for (const auto& s : skinAcc) {
-            if (s.first < 0 || s.first >= (int)bones.size()) continue;
-            acc[(size_t)s.first].x += s.second.x;
-            acc[(size_t)s.first].y += s.second.y;
-            acc[(size_t)s.first].z += s.second.z;
-            cnt[(size_t)s.first]++;
-        }
-        for (size_t i = 0; i < bones.size(); ++i) {
-            if (cnt[i] <= 0) continue;
-            const float x = acc[i].x / (float)cnt[i];
-            const float y = acc[i].y / (float)cnt[i];
-            const float z = acc[i].z / (float)cnt[i];
-            if (!Finite3(x, y, z) || fabsf(x) + fabsf(y) + fabsf(z) > 800.0f) continue;
-            bones[i].pos = {x, y, z};
-        }
-        for (size_t i = 0; i < bones.size(); ++i) {
-            if (cnt[i] > 0) continue;
-            int p = bones[i].parent;
-            while (p >= 0 && cnt[(size_t)p] <= 0) p = bones[(size_t)p].parent;
-            if (p >= 0) bones[i].pos = bones[(size_t)p].pos;
+    bool anyMatrix = false;
+    for (const auto& b : bones) {
+        if (fabsf(b.pos.x) + fabsf(b.pos.y) + fabsf(b.pos.z) > 0.001f) {
+            anyMatrix = true;
+            break;
         }
     }
-    LayoutBones(bones, meshes);
+    if (!anyMatrix) LayoutBones(bones, meshes);  // fallback if no bind poses
     return !meshes.empty();
 }

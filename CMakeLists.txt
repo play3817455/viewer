@@ -34,6 +34,7 @@ add_executable(GundamRes
     src/fpmf.cpp
     src/image_io.cpp
     src/dxg.cpp
+    src/anim.cpp
     src/vra_text.cpp
     src/preview3d.cpp
 )

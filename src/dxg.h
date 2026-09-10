@@ -25,12 +25,25 @@ struct DxgMesh {
     std::vector<DxgVec3> nrm;
     std::vector<DxgVec2> uv;
     std::vector<uint32_t> idx;
+
+    // Skinning (confirmed in sub_B71290): every shape carries its own bone name
+    // table (shape+4 = count, <= 26) and a u16 bone index per vertex that points
+    // into it. The game does not use smooth weights - each vertex follows exactly
+    // one bone.
+    std::vector<std::string> boneNames;   // shape bone palette
+    std::vector<uint16_t> vertBone;       // per vertex index into boneNames
 };
 
+// Skeleton entry.
+// The game stores, per bone: a hierarchy record (idx,parent,child,sibling) and a
+// 4x4 bind-pose matrix in model space (see DXG chunk type 36).
 struct DxgBone {
     std::string name;
     int parent = -1;
-    DxgVec3 pos{};
+    int child = -1;
+    int sibling = -1;
+    float m[16]{};  // bind pose, row-major (m[12..14] = translation)
+    DxgVec3 pos{};  // translation part of m
 };
 
 struct DxgModel {
