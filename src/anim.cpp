@@ -118,9 +118,13 @@ bool MrbMotion::Parse(const uint8_t* d, size_t size) {
     if (ds + 16 > size) return false;
     nKeys = Rd32(d + ds);
     if (nKeys == 0 || nKeys > 100000) return false;
-    const uint32_t fileBones = Rd32(d + ds + 12);
-    nBones = (fileBones > 0 && fileBones <= boneNames.size()) ? fileBones
-                                                             : (uint32_t)boneNames.size();
+    // The index table has one row per name of the name table: the loader builds it
+    // from that list (sub_B71290 / sub_B72E80 walk the names). So the row count is
+    // the NAME count, not the bone count at ds+12 - that one is smaller (e.g. 17 vs
+    // 20) and using it misaligns every row, which showed up as heavy per frame
+    // jitter. Verified: with rowCount = names the rotation index of bone 0 walks
+    // 1,2,3..22, bone 1 walks 23..44, bone 2 walks 45..67 (key frame compression).
+    nBones = (uint32_t)boneNames.size();
 
     const size_t timeOff = ds + 16;
     if (timeOff + 4 * (size_t)nKeys + 32 > size) return false;
@@ -141,10 +145,25 @@ bool MrbMotion::Parse(const uint8_t* d, size_t size) {
         s += 16 * (c > 0 ? c : 1);
     }
 
-    // index table = the only window whose u16 values all stay below the key counts
-    size_t idxOff = 0;
+    // index table = trailing block, followed by an 8 byte footer (measured: the
+    // block always leaves exactly 4 spare u16 at the end of the file). Fall back to
+    // a scan for the first window whose u16 values all stay below 512.
     const size_t idxNeed = (size_t)nKeys * nBones * 3;
-    if (idxNeed && dataOff + idxNeed * 2 <= size) {
+    size_t idxOff = 0;
+    if (idxNeed && size >= 8 + idxNeed * 2) {
+        const size_t cand = size - 8 - idxNeed * 2;
+        if (cand >= dataOff) {
+            bool ok = true;
+            for (size_t k = 0; k < idxNeed; ++k) {
+                if (Rd16(d + cand + 2 * k) >= 512) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) idxOff = cand;
+        }
+    }
+    if (!idxOff && idxNeed && dataOff + idxNeed * 2 <= size) {
         for (size_t s = dataOff; s + idxNeed * 2 <= size; s += 2) {
             bool ok = true;
             for (size_t k = 0; k < idxNeed; ++k) {
@@ -171,6 +190,52 @@ bool MrbMotion::Parse(const uint8_t* d, size_t size) {
     hasRot = true;
     idx.resize(idxNeed);
     for (size_t k = 0; k < idxNeed; ++k) idx[k] = Rd16(d + idxOff + 2 * k);
+
+    // Key frame compression makes each (bone, channel) walk forward through the key
+    // array, so the indices it references form a dense run (measured: bone 0 walks
+    // 1..22, bone 1 23..44, bone 2 45..67, ... covering the whole array). A handful
+    // of entries are isolated - a single value with no neighbour in that run - and
+    // would pop for exactly one frame. Hold the previous frame's index for those.
+    for (uint32_t b = 0; b < nBones; ++b) {
+        for (int s = 0; s < 3; ++s) {
+            std::vector<uint16_t> vals(nKeys);
+            for (uint32_t k = 0; k < nKeys; ++k)
+                vals[k] = idx[((size_t)b * nKeys + k) * 3 + s];
+            uint16_t last = vals[0];
+            for (uint32_t k = 1; k < nKeys; ++k) {
+                bool dense = false;
+                for (uint32_t j = 0; j < nKeys && !dense; ++j) {
+                    const int dv = (int)vals[j] - (int)vals[k];
+                    if (dv == 1 || dv == -1) dense = true;
+                }
+                if (dense)
+                    last = vals[k];
+                else
+                    idx[((size_t)b * nKeys + k) * 3 + s] = last;
+            }
+        }
+    }
+
+    // Frame 0 is the odd slice out: for several bones its index lands outside the
+    // dense run that frames 1..nKeys-1 form (C_Spine: 138 against its own run
+    // 1..22, T_Backpack: 303 against a constant 0), which produced a single hard
+    // snap at the start of the loop. Frames 1.. are consistent, so restart from
+    // frame 1 whenever frame 0 disagrees with that run.
+    if (nKeys >= 3) {
+        for (uint32_t b = 0; b < nBones; ++b) {
+            for (int s = 0; s < 3; ++s) {
+                const size_t base = (size_t)b * nKeys * 3 + s;
+                uint16_t lo = 0xFFFF, hi = 0;
+                for (uint32_t k = 1; k < nKeys; ++k) {
+                    const uint16_t v = idx[base + (size_t)k * 3];
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+                const uint16_t v0 = idx[base];
+                if (v0 < lo || v0 > hi) idx[base] = idx[base + 3];
+            }
+        }
+    }
     return true;
 }
 
@@ -210,7 +275,7 @@ bool MrbMotion::Sample(float timeMs, std::vector<DxgVec3>& outT,
         const size_t i1 = ((size_t)b * nKeys + k2) * 3;
         if (i1 + 2 >= idx.size()) break;
         const size_t p0 = idx[i0 + 1], p1 = idx[i1 + 1];
-        if ((p0 + 1) * 3 <= posKeys.size() && (p1 + 1) * 3 <= posKeys.size()) {
+        if (useTrans && (p0 + 1) * 3 <= posKeys.size() && (p1 + 1) * 3 <= posKeys.size()) {
             const float* a = &posKeys[p0 * 3];
             const float* c = &posKeys[p1 * 3];
             outT[b].x = a[0] + (c[0] - a[0]) * f;
@@ -293,7 +358,15 @@ void BuildBoneWorld(const std::vector<DxgBone>& bones,
             const float* q = &localRot[i * 4];
             if (std::isfinite(q[0]) && std::isfinite(q[1]) && std::isfinite(q[2]) &&
                 std::isfinite(q[3])) {
-                QuatToMat(q, L);
+                // copy ONLY the 3x3: QuatToMat writes all 16 floats and would zero
+                // L[12..14]. With the translation channel off nothing puts the bind
+                // local offset back, which collapsed every animated bone onto the
+                // origin and balled the parts up.
+                float R[16];
+                QuatToMat(q, R);
+                L[0] = R[0];  L[1] = R[1];  L[2] = R[2];
+                L[4] = R[4];  L[5] = R[5];  L[6] = R[6];
+                L[8] = R[8];  L[9] = R[9];  L[10] = R[10];
             }
         }
         if (i < localTrans.size()) {

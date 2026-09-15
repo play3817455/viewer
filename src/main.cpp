@@ -18,6 +18,7 @@
 #include "fpmf.h"
 #include "image_io.h"
 #include "preview3d.h"
+#include "text_encoding.h"
 #include "vra_text.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -146,6 +147,39 @@ static void IniSet(const wchar_t* sec, const wchar_t* key, const std::wstring& v
     WritePrivateProfileStringW(sec, key, val.c_str(), ConfigPath().wstring().c_str());
 }
 
+// The preview frame is a top-level window whose rect is remembered in
+// config.ini, so a stale rect (monitor unplugged, resolution/DPI changed, or
+// a rect captured while the frame was minimized) would restore it off-screen
+// with no way to drag it back. Snap it into the work area of a real monitor
+// before creating it.
+static RECT ClampToVisibleDesktop(RECT r) {
+    int w = r.right - r.left;
+    int h = r.bottom - r.top;
+    if (w < 320) w = 320;
+    if (h < 240) h = 240;
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    HMONITOR mon = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) {
+        RECT wa{};
+        if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) return r;
+        mi.rcWork = wa;
+    }
+    const RECT wa = mi.rcWork;
+    const int waW = wa.right - wa.left;
+    const int waH = wa.bottom - wa.top;
+    if (w > waW) w = waW;
+    if (h > waH) h = waH;
+    int x = r.left;
+    int y = r.top;
+    if (x < wa.left) x = wa.left;
+    if (y < wa.top) y = wa.top;
+    if (x + w > wa.right) x = wa.right - w;
+    if (y + h > wa.bottom) y = wa.bottom - h;
+    RECT out{x, y, x + w, y + h};
+    return out;
+}
+
 static void SaveConfig() {
     if (!g_cat.dataRoot.empty()) IniSet(L"paths", L"data", g_cat.dataRoot.wstring());
     IniSet(L"paths", L"extract", g_extractDir.wstring());
@@ -154,13 +188,20 @@ static void SaveConfig() {
     IniSet(L"ui", L"bg", std::to_wstring(g_bgMode));
     IniSet(L"ui", L"export_struct", g_exportStruct ? L"1" : L"0");
     if (g_prevFrame && IsWindow(g_prevFrame)) {
-        RECT r{};
-        GetWindowRect(g_prevFrame, &r);
-        IniSet(L"ui", L"prev_x", std::to_wstring(r.left));
-        IniSet(L"ui", L"prev_y", std::to_wstring(r.top));
-        IniSet(L"ui", L"prev_w", std::to_wstring(r.right - r.left));
-        IniSet(L"ui", L"prev_h", std::to_wstring(r.bottom - r.top));
-        IniSet(L"ui", L"prev_show", IsWindowVisible(g_prevFrame) ? L"1" : L"0");
+        // rcNormalPosition, and never while minimized: GetWindowRect() on a
+        // minimized window returns the -32000, -32000 "iconic" rect, which
+        // would park the frame off-screen on the next start.
+        WINDOWPLACEMENT wp{};
+        wp.length = sizeof(wp);
+        if (GetWindowPlacement(g_prevFrame, &wp) && wp.showCmd != SW_SHOWMINIMIZED) {
+            const RECT& r = wp.rcNormalPosition;
+            IniSet(L"ui", L"prev_x", std::to_wstring(r.left));
+            IniSet(L"ui", L"prev_y", std::to_wstring(r.top));
+            IniSet(L"ui", L"prev_w", std::to_wstring(r.right - r.left));
+            IniSet(L"ui", L"prev_h", std::to_wstring(r.bottom - r.top));
+        }
+        IniSet(L"ui", L"prev_show",
+               (IsWindowVisible(g_prevFrame) && !IsIconic(g_prevFrame)) ? L"1" : L"0");
     }
 }
 
@@ -303,6 +344,12 @@ static std::wstring DisplayName(const fpmf::FileEntry& e) {
 
 static std::wstring FileExt(const std::wstring& name) {
     return ToLower(std::filesystem::path(name).extension().wstring());
+}
+
+// Only these plain-text tables get encoding sniffing; every other format keeps
+// the old system-codepage behaviour.
+static bool IsTextTableExt(const std::wstring& ext) {
+    return ext == L".csv" || ext == L".txt" || ext == L".xml" || ext == L".cfg";
 }
 
 static void ReadFilterUi() {
@@ -1296,10 +1343,19 @@ static void ShowPreview(int arch, int fileIndex) {
 
         const bool textLike = strstr(kind, "CSV") || strstr(kind, "Text") || strstr(kind, "XML");
         if (textLike && !data.empty() && !Preview3D_Active()) {
-            data.push_back(0);
-            const int n = MultiByteToWideChar(CP_ACP, 0, (char*)data.data(), -1, nullptr, 0);
-            std::wstring body(n > 0 ? n - 1 : 0, 0);
-            if (n > 1) MultiByteToWideChar(CP_ACP, 0, (char*)data.data(), -1, body.data(), n);
+            std::wstring body;
+            if (IsTextTableExt(ext)) {
+                const std::string bytes((const char*)data.data(), data.size());
+                const textenc::Sniffed enc = textenc::ToWide(bytes, body);
+                text += L"Text encoding: ";
+                text += enc.name;
+                text += L"\r\n";
+            } else {
+                data.push_back(0);
+                const int n = MultiByteToWideChar(CP_ACP, 0, (char*)data.data(), -1, nullptr, 0);
+                body.assign(n > 0 ? (size_t)n - 1 : 0, L'\0');
+                if (n > 1) MultiByteToWideChar(CP_ACP, 0, (char*)data.data(), -1, body.data(), n);
+            }
             if (body.size() > 8000) body.resize(8000);
             text += body;
         } else if (!g_bmp && !Preview3D_Active()) {
@@ -1834,6 +1890,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 py = _wtoi(IniGet(L"ui", L"prev_y").c_str());
                 pw = (std::max)(320, _wtoi(IniGet(L"ui", L"prev_w").c_str()));
                 ph = (std::max)(240, _wtoi(IniGet(L"ui", L"prev_h").c_str()));
+                const RECT r = ClampToVisibleDesktop({px, py, px + pw, py + ph});
+                px = (int)r.left;
+                py = (int)r.top;
+                pw = (int)(r.right - r.left);
+                ph = (int)(r.bottom - r.top);
             }
             g_prevFrame = CreateWindowExW(0, pc.lpszClassName, L"Preview",
                                           WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,

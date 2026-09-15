@@ -168,19 +168,19 @@ bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint1
     if (out.idx.empty()) return false;
 
     // ---- skinning data -----------------------------------------------------
-    // sub_B71290 reads a bone name table at shape+4 (count, <= 26) and a per
-    // vertex u16 bone index. Both live in the shape tail; locate them by content
-    // instead of a fixed offset.
+    // Exact layout from the loader (sub_B7ACA0 / sub_B7ACB0 / sub_B7ACD0):
+    //   [shape+16 ] vertex records  10 * nVerts
+    //   [..       ] index buffer     6 * nFaces
+    //   [..       ] u32 paletteSize
+    //   [..       ] paletteSize bytes of zero separated bone names (shape palette)
+    //   [..       ] 4 bytes per vertex, size at shape+8 (must be nVerts * 4).
+    //               sub_B71290 copies this block into the vertex object and
+    //               sub_B1E510 writes its dword per vertex. Byte 0 of each record
+    //               is the palette slot the vertex is bound to.
     out.boneNames.clear();
     out.vertBone.clear();
     const uint8_t nc = shape[4];
     if (nc > 0 && nc <= 26) {
-        // Exact layout from the loader (sub_B7ACB0 / sub_B7ACD0):
-        //   [shape+16 .. ] vertex records   10 * nVerts
-        //   [.. ]         index buffer      6  * nFaces
-        //   [.. ]         u32 paletteSize
-        //   [.. ]         paletteSize bytes of zero separated bone names
-        //   [.. ]         u16 bone index per vertex
         const size_t ibRel = 16u + (size_t)nVerts * 10u + (size_t)nFaces * 6u;
         if (ibRel + 4 <= avail) {
             const uint32_t tblSize = Rd32(shape + ibRel);
@@ -218,15 +218,14 @@ bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint1
                 }
             }
             if (!out.boneNames.empty()) {
-                const size_t boneOff = tblOff + tblSize;
-                if (boneOff + 2u * (size_t)nVerts <= avail) {
-                    // Tolerate a few stray entries: clamp them to the first bone
-                    // instead of throwing the whole array away (that would leave
-                    // the shape frozen in bind pose).
+                const size_t blkOff = tblOff + tblSize;
+                const uint32_t blkSize = Rd32(shape + 8);
+                if (blkSize == (uint32_t)nVerts * 4u && blkOff + blkSize <= avail) {
+                    // 4 bytes per vertex; byte 0 is the palette slot.
                     out.vertBone.resize(nVerts);
                     for (uint16_t i = 0; i < nVerts; ++i) {
-                        const uint16_t v = Rd16(shape + boneOff + 2u * i);
-                        out.vertBone[i] = (v < out.boneNames.size()) ? v : 0;
+                        const uint8_t slot = shape[blkOff + 4u * (size_t)i];
+                        out.vertBone[i] = (slot < out.boneNames.size()) ? slot : 0;
                     }
                 }
             }

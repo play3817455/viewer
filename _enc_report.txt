@@ -1,0 +1,8 @@
+=== CSV utf8 japanese  (favms_ok_list.csv) ===
+main=398326 frame=592798 list=593482 items=1
+main children : [('msctls_progress32', 1013), ('Static', 1008), ('ComboBox', 1005), ('Edit', 1001), ('Static', 1009), ('Edit', 1006), ('Button', 1010), ('Static', 1011), ('Button', 1012), ('SysTreeView32', 1001), ('SysListView32', 1002), ('SysHeader32', 0), ('msctls_statusbar32', 1004)]
+frame children: [('GundamImgPrev', 1007), ('GundamD3DPrev', 1014), ('Edit', 1003)]
+alive after select: False
+frame children now: []
+GetDlgItem(1003)=None
+

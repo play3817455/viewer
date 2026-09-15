@@ -36,6 +36,14 @@ struct MrbMotion {
 
     std::vector<float> pos;       // legacy flat view (key * nBones + bone) * 3
 
+    // Applying the translation channel tears the mesh apart (measured: joint
+    // triangles stretch 4..11x, vs 1.0..1.55x for rotation only). A rotation
+    // cannot change lengths, so |t| must equal |P_bone - P_parent| in every frame
+    // for the channel to be a local offset - it does not (T_L_UpperArm: 25.82 vs
+    // 23.36), so the file's translation is not the local offset of this skeleton.
+    // Off by default; the viewer can switch it on with T for comparison.
+    bool useTrans = false;
+
     bool Parse(const uint8_t* data, size_t size);
     bool Valid() const { return nKeys > 0 && nBones > 0 && !posKeys.empty(); }
     // The time array can end with a small loop marker pair (1, 4) that is not a

@@ -85,7 +85,7 @@ float g_attack = 0.0f;         // attack animation time remaining (seconds)
 const float kAttackDur = 0.55f;
 float g_walkPhase = 0.0f;
 bool g_useBones = true;        // B toggles: false = every part stays in model space
-bool g_useSkin = false;        // M toggles per vertex skinning (still being verified)
+bool g_useSkin = true;         // M toggles per vertex skinning (geometric bone assign)
 float g_moveX = 0.0f, g_moveZ = 0.0f;
 float g_facing = 0.0f;
 float g_bob = 0.0f;
@@ -121,6 +121,36 @@ void BindWorld(std::vector<float>& out) {
         W[2] = R[6]; W[6] = R[7]; W[10] = R[8]; W[14] = t[2];
         W[3] = 0;    W[7] = 0;    W[11] = 0;    W[15] = 1.0f;
     }
+}
+
+// Distance from a point to the bone segment (bone origin -> child origin); for a
+// leaf bone it degrades to the distance to its origin. Used to decide which bone
+// of a shape palette owns a vertex.
+float BoneSegDist(const DxgVec3& p, const std::vector<float>& bw,
+                  const std::vector<DxgBone>& bones, int b) {
+    if (b < 0 || (size_t)b >= bones.size() || bw.size() < ((size_t)b + 1) * 16)
+        return 1.0e18f;
+    const float* a = &bw[(size_t)b * 16];
+    const float ax = a[12], ay = a[13], az = a[14];
+    float best = sqrtf((p.x - ax) * (p.x - ax) + (p.y - ay) * (p.y - ay) +
+                       (p.z - az) * (p.z - az));
+    for (size_t c = 0; c < bones.size(); ++c) {
+        if (bones[c].parent != b) continue;
+        const float* q = &bw[c * 16];
+        const float dx = q[12] - ax, dy = q[13] - ay, dz = q[14] - az;
+        const float L2 = dx * dx + dy * dy + dz * dz;
+        float t = 0.0f;
+        if (L2 > 1.0e-9f) {
+            t = ((p.x - ax) * dx + (p.y - ay) * dy + (p.z - az) * dz) / L2;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+        }
+        const float cx = ax + t * dx, cy = ay + t * dy, cz = az + t * dz;
+        const float d = sqrtf((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy) +
+                              (p.z - cz) * (p.z - cz));
+        if (d < best) best = d;
+    }
+    return best;
 }
 
 // Part -> bone binding.
@@ -798,21 +828,56 @@ bool Preview3D_Load(const Preview3DInput& in) {
     g_bones = model.bones;
     g_boneCount = (unsigned)g_bones.size();
     for (auto& d : g_draws) {
-        // Per vertex skinning: resolve the shape bone palette against the
-        // skeleton by name. When that works the part must NOT also ride on a
-        // single bone, otherwise it would be transformed twice.
         d.vbone.assign(d.basePos.size(), -1);
         bool any = false;
-        if (d.vertBone.size() == d.basePos.size()) {
-            for (size_t i = 0; i < d.vertBone.size(); ++i) {
-                const size_t slot = d.vertBone[i];
-                if (slot >= d.shapeBones.size()) continue;
+        // Resolve the shape palette against the skeleton by name, exactly like the
+        // engine does in sub_B72E80 (up to 26 names, each looked up in the skeleton
+        // with an exact string compare).
+        std::vector<int> pal;   // palette slot -> skeleton bone index (-1 = absent)
+        if (!d.shapeBones.empty()) {
+            pal.assign(d.shapeBones.size(), -1);
+            for (size_t s = 0; s < d.shapeBones.size(); ++s) {
                 for (size_t b = 0; b < g_bones.size(); ++b) {
-                    if (g_bones[b].name == d.shapeBones[slot]) {
-                        d.vbone[i] = (int)b;
-                        any = true;
+                    if (g_bones[b].name == d.shapeBones[s]) {
+                        pal[s] = (int)b;
                         break;
                     }
+                }
+            }
+        }
+        // 1) preferred: the file's own per vertex binding (4 bytes per vertex, the
+        //    first byte is the palette slot; see sub_B7ACD0 / sub_B71290).
+        if (d.vertBone.size() == d.basePos.size() && !pal.empty()) {
+            for (size_t i = 0; i < d.basePos.size(); ++i) {
+                const size_t slot = d.vertBone[i];
+                if (slot < pal.size() && pal[slot] >= 0) {
+                    d.vbone[i] = pal[slot];
+                    any = true;
+                }
+            }
+        }
+        // 2) fallback (no usable file data): nearest bone segment inside the palette
+        if (!any && !pal.empty() && !g_bones.empty() && d.basePos.size() > 4) {
+            std::vector<int> ok;
+            for (int b : pal) {
+                if (b >= 0) ok.push_back(b);
+            }
+            std::vector<float> bw;
+            BindWorld(bw);
+            if (!ok.empty() && bw.size() >= g_bones.size() * 16) {
+                for (size_t i = 0; i < d.basePos.size(); ++i) {
+                    const DxgVec3& p = d.basePos[i];
+                    float bestD = 1.0e18f;
+                    int bestB = -1;
+                    for (int b : ok) {
+                        const float dd = BoneSegDist(p, bw, g_bones, b);
+                        if (dd < bestD) {
+                            bestD = dd;
+                            bestB = b;
+                        }
+                    }
+                    d.vbone[i] = bestB;
+                    if (bestB >= 0) any = true;
                 }
             }
         }
@@ -1068,6 +1133,12 @@ LRESULT Preview3D_WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
         if (k == 'B' || k == 'b') {
             g_useBones = !g_useBones;
+            Preview3D_Render();
+        }
+        if (k == 'T' || k == 't') {
+            // also drive the skeleton from the file's translation channel (it is
+            // off by default, see MrbMotion::useTrans)
+            g_motion.useTrans = !g_motion.useTrans;
             Preview3D_Render();
         }
         if (k == 'M' || k == 'm') {
