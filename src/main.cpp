@@ -920,9 +920,20 @@ static void BuildVfsInto(const fpmf::Catalog& cat, std::vector<VfsNode>& vfs,
         for (int fi = 0; fi < (int)ar.files.size(); ++fi) {
             const auto path = VfsPathOf(ar, ar.files[fi]);
             if (path.empty()) continue;
-            if (owned.find(path) != owned.end()) continue;
-            owned[path] = {ai, fi};
-            pathIndex[ToLower(path)] = {ai, fi};
+            // Never drop a distinct file just because its VFS path collides
+            // with an earlier one: disambiguate the tree key so both survive.
+            std::wstring key = path;
+            if (owned.find(key) != owned.end()) {
+                unsigned dup = 2;
+                std::wstring cand;
+                do {
+                    cand = path + L"#" + std::to_wstring(dup);
+                    ++dup;
+                } while (owned.find(cand) != owned.end());
+                key = std::move(cand);
+            }
+            owned[key] = {ai, fi};
+            pathIndex[ToLower(key)] = {ai, fi};
             const auto unit = UnitIdFromPath(path);
             if (!unit.empty()) unitIndex[unit].push_back({ai, fi});
         }

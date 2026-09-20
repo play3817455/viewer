@@ -14,34 +14,39 @@
 // data section   : u32 nKeys
 //                  u32 4
 //                  u32[nKeys]  key time in milliseconds (16.67ms steps => 60fps)
-//                  8 x u32     block descriptor
-//                  float[]     per (key, bone): local translation xyz
+//                  u32[8]     block descriptor (NOT the channel pool counts)
+//                  float[]     translation keys (vec3) - the col0 pool, at dataOff
+//                  float[]     rotation keys (quat)    - the col1 pool, follows it
+//                  u16[]      index table (nKeys * nBones * 3) at file tail
 //
-// The translation layout was confirmed against the skeleton bind pose: decoding
-// DXG chunk 36 matrices as INVERSE bind matrices and taking the local offset
-// reproduces the first key of the motion (avg error 0.89 units).
+// Channel layout verified by reverse-engineering the on-disk data (not the loader):
+// col0 = translation (vec3 pool right at dataOff), col1 = rotation (unit-quaternion
+// pool that follows), col2 = scale (all-zero in these files). The index is bone-major.
 struct MrbMotion {
     std::vector<std::string> boneNames;
     uint32_t nKeys = 0;
     uint32_t nBones = 0;          // animated bone count from the file
     std::vector<uint32_t> times;  // milliseconds
 
-    // Key-frame compressed layout, confirmed against sub_B3FDB0 (rhyme motion
-    // loader): the file stores three independent key channels (scale / rotation /
-    // translation) plus one u16 index per (key, bone, channel).
-    std::vector<float> posKeys;   // translation keys, count * 3
+    // Key-frame compressed layout: three independent key channels (translation /
+    // rotation / scale) plus one u16 index per (key, bone, channel). The index is
+    // bone-major; per (bone, key) the triple is (translation, rotation, scale) at
+    // columns 0, 1, 2.
+    std::vector<float> posKeys;   // translation keys, count * 3 (vec3)
     std::vector<float> rotKeys;   // rotation keys,    count * 4 (quat x,y,z,w)
-    std::vector<uint16_t> idx;    // nKeys * nBones * 3 -> (scale, trans, rot)
+    std::vector<uint16_t> idx;    // nKeys * nBones * 3 -> (translation, rotation, scale)
     bool hasRot = false;
 
     std::vector<float> pos;       // legacy flat view (key * nBones + bone) * 3
 
-    // Applying the translation channel tears the mesh apart (measured: joint
-    // triangles stretch 4..11x, vs 1.0..1.55x for rotation only). A rotation
-    // cannot change lengths, so |t| must equal |P_bone - P_parent| in every frame
-    // for the channel to be a local offset - it does not (T_L_UpperArm: 25.82 vs
-    // 23.36), so the file's translation is not the local offset of this skeleton.
-    // Off by default; the viewer can switch it on with T for comparison.
+    // The translation channel is the local offset of each bone (verified: its pool
+    // sits at dataOff and the values are per-bone position offsets). Applying it by
+    // REPLACING the bind local offset tears the mesh (the motion frame-0 translation
+    // differs from the chunk-36 bind local offset, so the skeleton is double-placed
+    // and limbs stretch 4..11x). The correct handling is additive (motion translation
+    // += bind local translation), which is not yet wired up, so it defaults OFF and
+    // the viewer can toggle it with T for comparison. Rotation (col1) is always applied
+    // and drives the animation.
     bool useTrans = false;
 
     bool Parse(const uint8_t* data, size_t size);
@@ -55,6 +60,7 @@ struct MrbMotion {
         }
         return m;
     }
+    void DumpDebug() const;
 
     // Interpolated local translation / rotation for every animated bone.
     // outT[b] is xyz, outR[b] is a xyzw quaternion (4 floats).

@@ -78,37 +78,42 @@ Archive LoadHed(const std::filesystem::path& hedPath) {
 
     size_t off = 0;
     for (uint32_t c = 0; c < nchunk; ++c) {
-        Ensure(off + 8 <= payload.size(), "chunk header overrun");
+        // Never let a malformed chunk discard the whole archive: skip it.
+        if (off + 8 > payload.size()) break;
         const uint32_t type = *reinterpret_cast<const uint32_t*>(payload.data() + off);
         const uint32_t sz = *reinterpret_cast<const uint32_t*>(payload.data() + off + 4);
         off += 8;
-        Ensure(off + sz <= payload.size(), "chunk body overrun");
+        if (off + sz > payload.size()) break;
         const uint8_t* body = payload.data() + off;
 
         if (type == 1 && sz >= 1) {
             const uint8_t n = body[0];
-            Ensure(static_cast<size_t>(1 + n * 2 + 8) <= sz, "type1 short");
-            ar.volume.format = ReadWstring(body + 1, n);
-            ar.volume.extraCount = *reinterpret_cast<const uint32_t*>(body + 1 + n * 2);
-            ar.volume.extraField = *reinterpret_cast<const uint32_t*>(body + 1 + n * 2 + 4);
+            if (static_cast<size_t>(1 + n * 2 + 8) <= sz) {
+                ar.volume.format = ReadWstring(body + 1, n);
+                ar.volume.extraCount = *reinterpret_cast<const uint32_t*>(body + 1 + n * 2);
+                ar.volume.extraField =
+                    *reinterpret_cast<const uint32_t*>(body + 1 + n * 2 + 4);
+            }
         } else if (type == 3 && sz >= 4) {
             const uint32_t count = *reinterpret_cast<const uint32_t*>(body);
             size_t p = 4;
             ar.files.reserve(count);
             for (uint32_t i = 0; i < count; ++i) {
-                Ensure(p + 1 <= sz, "entry namelen");
+                // A malformed entry only skips the rest of this chunk's
+                // entries, not the entire archive.
+                if (p + 1 > sz) break;
                 const uint8_t nlen = body[p++];
-                Ensure(p + nlen * 2 + 1 <= sz, "entry name");
+                if (p + nlen * 2 + 1 > sz) break;
                 FileEntry e;
                 e.folder = ReadWstring(body + p, nlen);
                 p += nlen * 2u;
                 const uint8_t plen = body[p++];
                 if (plen) {
-                    Ensure(p + plen * 2 <= sz, "entry path");
+                    if (p + plen * 2 > sz) break;
                     e.path = ReadWstring(body + p, plen);
                     p += plen * 2u;
                 }
-                Ensure(p + 4 + 8 + 4 + 4 + 8 <= sz, "entry tail");
+                if (p + 4 + 8 + 4 + 4 + 8 > sz) break;
                 e.volume = *reinterpret_cast<const uint32_t*>(body + p);
                 p += 4;
                 memcpy(e.fileKey, body + p, 8);

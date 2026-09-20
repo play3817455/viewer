@@ -1,0 +1,193 @@
+{geometry
+	{mesh
+		(name string[1] "FZ_F02_field01_DAB_00")
+		{lod0
+			(material_id int32[1] 0)
+		}
+	}
+	{mesh
+		(name string[1] "FZ_F02_field01_DAB_01")
+		{lod0
+			(material_id int32[1] 1)
+		}
+	}
+	{mesh
+		(name string[1] "FZ_F02_field01_DAB_02")
+		{lod0
+			(material_id int32[1] 2)
+		}
+	}
+	{mesh
+		(name string[1] "FZ_F02_field01_DAB_03")
+		{lod0
+			(material_id int32[1] 3)
+		}
+	}
+	{mesh
+		(name string[1] "FZ_F02_field01_DAB_04")
+		{lod0
+			(material_id int32[1] 4)
+		}
+	}
+	{mesh
+		(name string[1] "FZ_F02_field01_DAB_05")
+		{lod0
+			(material_id int32[1] 5)
+		}
+	}
+}
+{material_set
+	{material
+		(id int32[1] 0)
+		{texture
+			{diffuse
+				(fname string[1] "world/field/F02\tex\FT_F02_be_field01.dds")
+			}
+		}
+		{param_block
+			(twoSided int32[1] 1)
+			(ambient vector3[1] 0.588000, 0.588000, 0.588000)
+			(diffuse vector3[1] 0.588000, 0.588000, 0.588000)
+			(fx_fname string[1] "shader/pandora.fx")
+			(fx_technique string[1] "RigidColorTex")
+			(fog_enable int32[1] 1)
+			(alpha_test_enable int32[1] 1)
+			(alpha_ref int32[1] 100)
+			(alpha_func string[1] "Greater")
+			(alpha_blend_enable int32[1] 0)
+			(dest_blend string[1] "Zero")
+			(src_blend string[1] "One")
+			(draw_priority int32[1] 0)
+			(u_add float[1] 0.000000)
+			(v_add float[1] 0.000000)
+		}
+	}
+	{material
+		(id int32[1] 1)
+		{texture
+			{diffuse
+				(fname string[1] "world/field/F02\tex\FT_F02_be_wall01.dds")
+			}
+		}
+		{param_block
+			(twoSided int32[1] 0)
+			(ambient vector3[1] 0.588000, 0.588000, 0.588000)
+			(diffuse vector3[1] 0.588000, 0.588000, 0.588000)
+			(fx_fname string[1] "shader/pandora.fx")
+			(fx_technique string[1] "RigidColorTex")
+			(fog_enable int32[1] 1)
+			(alpha_test_enable int32[1] 0)
+			(alpha_ref int32[1] 0)
+			(alpha_func string[1] "Greater")
+			(alpha_blend_enable int32[1] 0)
+			(dest_blend string[1] "Zero")
+			(src_blend string[1] "One")
+			(draw_priority int32[1] 0)
+			(u_add float[1] 0.000000)
+			(v_add float[1] 0.000000)
+		}
+	}
+	{material
+		(id int32[1] 2)
+		{texture
+			{diffuse
+				(fname string[1] "world/field/F02\tex\FT_F02_be_road01.dds")
+			}
+		}
+		{param_block
+			(twoSided int32[1] 0)
+			(ambient vector3[1] 0.588235, 0.588235, 0.588235)
+			(diffuse vector3[1] 0.588235, 0.588235, 0.588235)
+			(fx_fname string[1] "shader/pandora.fx")
+			(fx_technique string[1] "RigidColorTex")
+			(fog_enable int32[1] 1)
+			(alpha_test_enable int32[1] 0)
+			(alpha_ref int32[1] 0)
+			(alpha_func string[1] "Greater")
+			(alpha_blend_enable int32[1] 0)
+			(dest_blend string[1] "Zero")
+			(src_blend string[1] "One")
+			(draw_priority int32[1] 0)
+			(u_add float[1] 0.000000)
+			(v_add float[1] 0.000000)
+		}
+	}
+	{material
+		(id int32[1] 3)
+		{texture
+			{diffuse
+				(fname string[1] "world/field/F02\tex\FT_F02_be_field02.dds")
+			}
+		}
+		{param_block
+			(twoSided int32[1] 0)
+			(ambient vector3[1] 0.588000, 0.588000, 0.588000)
+			(diffuse vector3[1] 0.588000, 0.588000, 0.588000)
+			(fx_fname string[1] "shader/pandora.fx")
+			(fx_technique string[1] "RigidColorTex")
+			(fog_enable int32[1] 1)
+			(alpha_test_enable int32[1] 0)
+			(alpha_ref int32[1] 0)
+			(alpha_func string[1] "Greater")
+			(alpha_blend_enable int32[1] 0)
+			(dest_blend string[1] "Zero")
+			(src_blend string[1] "One")
+			(draw_priority int32[1] 0)
+			(u_add float[1] 0.000000)
+			(v_add float[1] 0.000000)
+		}
+	}
+	{material
+		(id int32[1] 4)
+		{texture
+			{diffuse
+				(fname string[1] "world/field/F02\tex\FT_F02_be_bill01.dds")
+			}
+		}
+		{param_block
+			(twoSided int32[1] 0)
+			(ambient vector3[1] 0.588235, 0.588235, 0.588235)
+			(diffuse vector3[1] 0.588235, 0.588235, 0.588235)
+			(fx_fname string[1] "shader/pandora.fx")
+			(fx_technique string[1] "RigidColorTex")
+			(fog_enable int32[1] 1)
+			(alpha_test_enable int32[1] 1)
+			(alpha_ref int32[1] 0)
+			(alpha_func string[1] "Greater")
+			(alpha_blend_enable int32[1] 0)
+			(dest_blend string[1] "Zero")
+			(src_blend string[1] "One")
+			(draw_priority int32[1] 0)
+			(u_add float[1] 0.000000)
+			(v_add float[1] 0.000000)
+		}
+	}
+	{material
+		(id int32[1] 5)
+		{texture
+			{diffuse
+				(fname string[1] "world/field/F02\tex\FT_F02_be_field01.dds")
+			}
+		}
+		{param_block
+			(twoSided int32[1] 0)
+			(ambient vector3[1] 0.588235, 0.588235, 0.588235)
+			(diffuse vector3[1] 0.588235, 0.588235, 0.588235)
+			(fx_fname string[1] "shader/pandora.fx")
+			(fx_technique string[1] "BlendColor")
+			(fog_enable int32[1] 1)
+			(alpha_test_enable int32[1] 0)
+			(alpha_ref int32[1] 0)
+			(alpha_func string[1] "Greater")
+			(alpha_blend_enable int32[1] 1)
+			(dest_blend string[1] "InvSrcAlpha")
+			(src_blend string[1] "SrcAlpha")
+			(draw_priority int32[1] 0)
+			(u_add float[1] 0.000000)
+			(v_add float[1] 0.000000)
+		}
+	}
+}
+{attribute
+	(Geometry string[1] "world/field/F02\model\FM_F02_field01_DAB.dxg")
+}

@@ -24,18 +24,6 @@ uint16_t Rd16(const uint8_t* p) {
     return v;
 }
 
-// Rotation keys are unit quaternions, translation/scale keys are not, so a run
-// of consecutive unit quaternions identifies the rotation channel.
-bool IsUnitQuat(const uint8_t* p) {
-    float v[4];
-    for (int k = 0; k < 4; ++k) {
-        memcpy(&v[k], p + 4 * k, 4);
-        if (!(v[k] == v[k]) || fabsf(v[k]) > 1.0e3f) return false;
-    }
-    const float s = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
-    return s > 0.985f && s < 1.015f;
-}
-
 // quaternion -> row-major 4x4 (column-major storage like the rest of the code)
 void QuatToMat(const float* q, float* o) {
     const float x = q[0], y = q[1], z = q[2], w = q[3];
@@ -133,63 +121,71 @@ bool MrbMotion::Parse(const uint8_t* d, size_t size) {
 
     const size_t dataOff = timeOff + 4 * (size_t)nKeys + 32;
 
-    // rotation channel = longest run of consecutive unit quaternions
-    size_t rotOff = 0, rotCount = 0;
-    for (size_t s = dataOff; s + 16 <= size;) {
-        size_t c = 0;
-        while (s + 16 * (c + 1) <= size && IsUnitQuat(d + s + 16 * c)) ++c;
-        if (c > rotCount) {
-            rotCount = c;
-            rotOff = s;
-        }
-        s += 16 * (c > 0 ? c : 1);
-    }
-
-    // index table = trailing block, followed by an 8 byte footer (measured: the
-    // block always leaves exactly 4 spare u16 at the end of the file). Fall back to
-    // a scan for the first window whose u16 values all stay below 512.
+    // Index table = trailing block, with an 8 byte footer of spare u16 at the very
+    // end. Its row count is the NAME count (the loader builds it from the name
+    // table), NOT the ds+12 bone count. Locate it from the file tail.
     const size_t idxNeed = (size_t)nKeys * nBones * 3;
-    size_t idxOff = 0;
-    if (idxNeed && size >= 8 + idxNeed * 2) {
-        const size_t cand = size - 8 - idxNeed * 2;
-        if (cand >= dataOff) {
-            bool ok = true;
-            for (size_t k = 0; k < idxNeed; ++k) {
-                if (Rd16(d + cand + 2 * k) >= 512) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) idxOff = cand;
-        }
+    if (idxNeed == 0 || size < 8 + idxNeed * 2) return false;
+    const size_t idxOff = size - 8 - idxNeed * 2;
+    if (idxOff < dataOff) return false;
+    {
+        bool ok = true;
+        for (size_t k = 0; k < idxNeed; ++k)
+            if (Rd16(d + idxOff + 2 * k) >= 60000) { ok = false; break; }
+        if (!ok) return false;
     }
-    if (!idxOff && idxNeed && dataOff + idxNeed * 2 <= size) {
-        for (size_t s = dataOff; s + idxNeed * 2 <= size; s += 2) {
-            bool ok = true;
-            for (size_t k = 0; k < idxNeed; ++k) {
-                if (Rd16(d + s + 2 * k) >= 512) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) {
-                idxOff = s;
-                break;
-            }
-        }
-    }
-    if (rotCount < 2 || rotOff <= dataOff || !idxOff) return false;
-
-    // translation keys fill the gap between the data start and the rotation block
-    const size_t posCount = (rotOff - dataOff) / 12;
-    if (posCount == 0) return false;
-    posKeys.resize(posCount * 3);
-    for (size_t i = 0; i < posCount * 3; ++i) posKeys[i] = Rdf(d + dataOff + 4 * i);
-    rotKeys.resize(rotCount * 4);
-    for (size_t i = 0; i < rotCount * 4; ++i) rotKeys[i] = Rdf(d + rotOff + 4 * i);
-    hasRot = true;
     idx.resize(idxNeed);
     for (size_t k = 0; k < idxNeed; ++k) idx[k] = Rd16(d + idxOff + 2 * k);
+
+    // Per-row layout of the index is (translation, rotation, scale) as 3 u16 at
+    // columns 0,1,2. Derive each channel's pool size from the column maxima; the
+    // on-disk "descriptor" words are not the pool counts (verified: col0 max 87 =>
+    // 88 translation vec3 at dataOff; col1 max 396 => ~395 rotation quats in the
+    // unit-quaternion region that follows; col2 all-zero => no scale).
+    uint16_t c0max = 0, c1max = 0, c2max = 0;
+    for (size_t i = 0; i < idxNeed; ++i) {
+        const uint16_t v = idx[i];
+        const int col = (int)(i % 3);
+        if (col == 0 && v > c0max) c0max = v;
+        else if (col == 1 && v > c1max) c1max = v;
+        else if (col == 2 && v > c2max) c2max = v;
+    }
+    const uint32_t transCount = (uint32_t)c0max + 1;   // col0 = translation (vec3)
+    const uint32_t rotCountMax = (uint32_t)c1max + 1; // col1 = rotation  (quat)
+    const uint32_t scaleCount = (uint32_t)c2max + 1;  // col2 = scale     (vec3, ~0)
+
+    // translation pool sits right at dataOff (vec3 per key)
+    const size_t transOff = dataOff;
+    if (transOff + (size_t)transCount * 12 > idxOff) return false;
+    posKeys.resize((size_t)transCount * 3);
+    for (size_t i = 0; i < (size_t)transCount * 3; ++i) posKeys[i] = Rdf(d + transOff + 4 * i);
+
+    // rotation pool = the run of unit quaternions immediately after the translation
+    // pool. Locate its start by scanning for a long consecutive unit-quat run.
+    auto isUQ = [&](size_t o) {
+        float v[4];
+        for (int kk = 0; kk < 4; ++kk) memcpy(&v[kk], d + o + 4 * kk, 4);
+        const float L = sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]+v[3]*v[3]);
+        return L > 0.985f && L < 1.015f;
+    };
+    size_t rotOff = 0;
+    {
+        size_t s = transOff + (size_t)transCount * 12;
+        while (s + 16 <= idxOff) {
+            size_t c = 0;
+            while (s + 16 * (c + 1) <= idxOff && isUQ(s + 16 * c)) ++c;
+            if (c >= 30) { rotOff = s; break; }
+            s += 16 * (c > 0 ? c : 1);
+        }
+    }
+    if (!rotOff) return false;
+    uint32_t rotCount = rotCountMax;
+    while (rotOff + (size_t)rotCount * 16 > idxOff) --rotCount;
+    if (rotCount == 0) return false;
+    rotKeys.resize((size_t)rotCount * 4);
+    for (size_t i = 0; i < (size_t)rotCount * 4; ++i) rotKeys[i] = Rdf(d + rotOff + 4 * i);
+    hasRot = true;
+    (void)scaleCount;
 
     // Key frame compression makes each (bone, channel) walk forward through the key
     // array, so the indices it references form a dense run (measured: bone 0 walks
@@ -266,15 +262,13 @@ bool MrbMotion::Sample(float timeMs, std::vector<DxgVec3>& outT,
     if (t1 > t0) f = (timeMs - t0) / (t1 - t0);
     if (f < 0.0f) f = 0.0f;
     if (f > 1.0f) f = 1.0f;
-    // The index table is bone-major: for every bone it holds nKeys triples of
-    // (scale, translation, rotation) key indices. Bone-major scored clearly better
-    // than key-major in the forward-kinematics check (avg bone length deviation
-    // 3.31 vs 6.47), so that is the layout used here.
+    // Index table is bone-major: for every bone it holds nKeys triples of
+    // (translation, rotation, scale) key indices at columns 0,1,2.
     for (uint32_t b = 0; b < nBones; ++b) {
         const size_t i0 = ((size_t)b * nKeys + k0) * 3;
         const size_t i1 = ((size_t)b * nKeys + k2) * 3;
         if (i1 + 2 >= idx.size()) break;
-        const size_t p0 = idx[i0 + 1], p1 = idx[i1 + 1];
+        const size_t p0 = idx[i0 + 0], p1 = idx[i1 + 0];   // col0 = translation
         if (useTrans && (p0 + 1) * 3 <= posKeys.size() && (p1 + 1) * 3 <= posKeys.size()) {
             const float* a = &posKeys[p0 * 3];
             const float* c = &posKeys[p1 * 3];
@@ -283,7 +277,10 @@ bool MrbMotion::Sample(float timeMs, std::vector<DxgVec3>& outT,
             outT[b].z = a[2] + (c[2] - a[2]) * f;
         }
         if (!hasRot) continue;
-        const size_t r0 = idx[i0 + 2], r1 = idx[i1 + 2];
+        // col1 = rotation key index (the unit-quaternion pool). The rotation pool
+        // follows the translation pool; reading rotation from the wrong column
+        // (col0/col2) froze every bone onto rotKeys[0] and stopped all animation.
+        const size_t r0 = idx[i0 + 1], r1 = idx[i1 + 1];
         if ((r0 + 1) * 4 <= rotKeys.size() && (r1 + 1) * 4 <= rotKeys.size()) {
             const float* a = &rotKeys[r0 * 4];
             const float* c = &rotKeys[r1 * 4];
@@ -297,6 +294,43 @@ bool MrbMotion::Sample(float timeMs, std::vector<DxgVec3>& outT,
         }
     }
     return true;
+}
+
+void MrbMotion::DumpDebug() const {
+    printf("[DUMP] nBones=%u nKeys=%u dur=%u hasRot=%d rotKeys=%zu idx=%zu\n",
+           nBones, nKeys, Duration(), (int)hasRot, rotKeys.size(), idx.size());
+    printf("[DUMP] times:");
+    for (uint32_t i = 0; i < nKeys && i < 12; ++i) printf(" %u", times[i]);
+    printf(" ... last=%u\n", times[nKeys - 1]);
+    printf("[DUMP] rotKeys[0..5]:");
+    for (size_t i = 0; i < rotKeys.size() / 4 && i < 6; ++i)
+        printf(" (%.3f,%.3f,%.3f,%.3f)", rotKeys[i*4], rotKeys[i*4+1], rotKeys[i*4+2], rotKeys[i*4+3]);
+    printf("\n");
+    for (uint32_t k : {(uint32_t)0, (uint32_t)1, nKeys / 2, nKeys - 1}) {
+        uint32_t ri = idx[((size_t)0 * nKeys + k) * 3 + 1];
+        printf("[DUMP] b0 key%u ridx=%u quat=(%.3f,%.3f,%.3f,%.3f)\n", k, ri,
+               rotKeys[ri*4], rotKeys[ri*4+1], rotKeys[ri*4+2], rotKeys[ri*4+3]);
+    }
+    // dump bone 0's three idx columns at several keys
+    printf("[DUMP] b0 idx cols (bone-major) k: [c0,c1,c2]\n");
+    uint32_t ks[] = {0,1,5,10,30,60};
+    for (uint32_t k : ks) {
+        uint16_t c0 = idx[((size_t)0 * nKeys + k) * 3 + 0];
+        uint16_t c1 = idx[((size_t)0 * nKeys + k) * 3 + 1];
+        uint16_t c2 = idx[((size_t)0 * nKeys + k) * 3 + 2];
+        printf("   k%u: [%u,%u,%u]\n", k, c0, c1, c2);
+    }
+    // which column has the varying (1..22) run? check per-column range over all bones/keys
+    for (int col = 0; col < 3; ++col) {
+        uint16_t lo = 0xFFFF, hi = 0; uint32_t nz = 0;
+        for (uint32_t b = 0; b < nBones; ++b)
+            for (uint32_t k = 0; k < nKeys; ++k) {
+                uint16_t v = idx[((size_t)b * nKeys + k) * 3 + col];
+                if (v) ++nz;
+                if (v < lo) lo = v; if (v > hi) hi = v;
+            }
+        printf("[DUMP] col%d range [%u..%u] nonzero=%u\n", col, lo, hi, nz);
+    }
 }
 
 void BuildBoneWorld(const std::vector<DxgBone>& bones,
