@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <fstream>
+#include <iterator>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -95,6 +98,24 @@ static std::vector<VfsNode> g_vfs;
 static std::vector<unsigned> g_vfsMatch;
 static std::map<std::wstring, std::vector<std::pair<int, int>>> g_unitIndex;
 static std::map<std::wstring, std::pair<int, int>> g_pathIndex;
+
+// favms_ok_list.csv 机体 ID → 客户端资源坐标的绑定表，由
+// datatables/build_favms_asset_bind.py 生成（viewer/ms_bind.csv）。
+// 两套编号：練度ID(7 位, 机体清单主键) / モデルID(9 位, chara 资源坐标)。
+struct MsBind {
+    std::wstring msId;     // 練度ID（7 位）
+    std::wstring name;     // 机体名
+    std::wstring modelId;  // モデルID（9 位）
+    std::wstring dir;      // chara/01/24/1201
+    std::wstring unit;     // 资源目录末段 = C（4 位），与 UnitIdFromPath 取值一致
+};
+static std::map<std::wstring, MsBind> g_msBind;       // key = 練度ID
+static std::map<std::wstring, MsBind> g_msBindModel;  // key = モデルID
+static std::set<std::wstring> g_idDirs;               // 「按 ID 搜」命中的资源目录 chara/01/24/1201
+static std::set<std::wstring> g_idCodes;              // 同机体的文件名编码 0124_1201（A+B 段 + "_" + C 段）
+static std::set<std::wstring> g_scanDirs;             // CLI 扫描出的资源目录集合（GUI 用 g_pathIndex）
+static std::wstring g_idDetail;                       // 状态栏上的 ID 命中说明
+static std::wstring g_msBindPath;                     // 实际加载的绑定表路径
 static ImageRgba g_imgData;
 static HBITMAP g_bmp = nullptr;
 static std::filesystem::path g_extractDir;
@@ -352,6 +373,8 @@ static bool IsTextTableExt(const std::wstring& ext) {
     return ext == L".csv" || ext == L".txt" || ext == L".xml" || ext == L".cfg";
 }
 
+static void ResolveIdSearch();
+
 static void ReadFilterUi() {
     wchar_t buf[128]{};
     GetWindowTextW(g_filter, buf, 128);
@@ -364,13 +387,19 @@ static void ReadFilterUi() {
     wchar_t sbuf[256]{};
     GetWindowTextW(g_search, sbuf, 256);
     g_searchText = ToLower(sbuf);
+    ResolveIdSearch();
 }
 
 static std::wstring VfsPathOf(const fpmf::Archive& ar, const fpmf::FileEntry& e);
+static std::wstring UnitIdFromPath(std::wstring path);
+static bool PathMatchesUnit(const std::wstring& lowerPath);
 
 static bool MatchesFilter(const fpmf::Archive& ar, const fpmf::FileEntry& e) {
     const std::wstring name = DisplayName(e);
     if (!g_filterExt.empty() && FileExt(name) != g_filterExt) return false;
+    // 「按机体 ID 搜」模式：只认绑定的资源目录（含同机体的 anim3/tex 文件名编码），忽略文本内容。
+    if (!g_idDirs.empty() || !g_idCodes.empty())
+        return PathMatchesUnit(ToLower(VfsPathOf(ar, e)));
     if (g_searchText.empty()) return true;
     if (ToLower(name).find(g_searchText) != std::wstring::npos) return true;
     return ToLower(VfsPathOf(ar, e)).find(g_searchText) != std::wstring::npos;
@@ -406,6 +435,192 @@ static std::wstring VfsPathOf(const fpmf::Archive& ar, const fpmf::FileEntry& e)
 
 static bool IsFourDigits(const std::wstring& s) {
     return s.size() == 4 && iswdigit(s[0]) && iswdigit(s[1]) && iswdigit(s[2]) && iswdigit(s[3]);
+}
+
+static bool IsAllDigits(const std::wstring& s) {
+    if (s.empty()) return false;
+    for (wchar_t c : s)
+        if (!iswdigit(c)) return false;
+    return true;
+}
+
+static void AddIdTarget(const std::wstring& dir);
+
+// 资源树里是否存在该目录（GUI 用已建好的路径索引，CLI 用扫描出的目录集合）。
+static bool DirExists(const std::wstring& lowerDir) {
+    const std::wstring prefix = lowerDir + L"/";
+    if (!g_pathIndex.empty()) {
+        auto it = g_pathIndex.lower_bound(prefix);
+        return it != g_pathIndex.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+    }
+    return g_scanDirs.count(lowerDir) > 0;
+}
+
+// ★ID → 资源ID 的规则（客户端实证：`sub_473390` 十进制拆位 + `sub_49D030` 拼路径）
+//   常规：  モデルID = A(1)B(2)C(4)NN(2) ⇒ 目录 chara/0A/B/C，文件 MSM_0A<B>_<C>_<NN>
+//           例 124120101 ⇒ A=1,B=24,C=1201,NN=01 ⇒ chara/01/24/1201
+//   大编号：kind==1 的少数机型 ⇒ 目录 chara/01/1<B>/0<C>，文件 MSM_01<1B>_<0C>_<NN>
+//           例 201330201 ⇒ chara/01/101/03302（实测 25 例，均为 A=2）
+// 两条规则由 names/chara目录-ID清单.csv（1646 条实测）反查确认：1621 常规 + 25 大编号，0 例外。
+// 9 位 ID 直接算得出资源坐标，不需要映射表；大编号只在常规目录不存在时才启用（防误配）。
+static bool ApplyModelIdRule(const std::wstring& id, std::wstring& dirOut) {
+    if (id.size() != 9 || !IsAllDigits(id)) return false;
+    const std::wstring a = id.substr(0, 1);
+    const std::wstring b = id.substr(1, 2);
+    const std::wstring c = id.substr(3, 4);
+    std::wstring dir = L"chara/0" + a + L"/" + b + L"/" + c;
+    if (!DirExists(ToLower(dir))) {
+        const std::wstring big = L"chara/01/1" + b + L"/0" + c;
+        if (DirExists(ToLower(big))) dir = big;
+    }
+    AddIdTarget(dir);  // 目录 + 文件名编码（两套格式都由它拼）
+    dirOut = dir;
+    return true;
+}
+
+// 记录一个要定位的机体资源目录：目录本身 + 文件名里的 8 位编码（MSM_0124_1201_01
+// 里的 0124_1201）。只看 4 位 C 段会撞车——chara/01/24/1201 与 chara/01/01/1201
+// 的 C 段同为 1201，却不是同一台机体，所以必须带上 A/B 段。
+static void AddIdTarget(const std::wstring& dir) {
+    if (dir.empty()) return;
+    std::wstring rest = ToLower(dir);
+    g_idDirs.insert(rest);
+    if (rest.compare(0, 6, L"chara/") == 0) rest.erase(0, 6);
+    std::vector<std::wstring> seg;
+    size_t p0 = 0;
+    while (p0 <= rest.size()) {
+        size_t sl = rest.find(L'/', p0);
+        if (sl == std::wstring::npos) sl = rest.size();
+        if (sl > p0) seg.push_back(rest.substr(p0, sl - p0));
+        if (sl == rest.size()) break;
+        p0 = sl + 1;
+    }
+    if (seg.size() >= 3) g_idCodes.insert(seg[0] + seg[1] + L"_" + seg[2]);
+}
+
+static bool PathMatchesUnit(const std::wstring& lowerPath) {
+    for (const auto& d : g_idDirs)
+        if (lowerPath.find(d) != std::wstring::npos) return true;
+    for (const auto& c : g_idCodes)
+        if (lowerPath.find(c) != std::wstring::npos) return true;
+    return false;
+}
+
+// ms_bind.csv 列：練度ID,机体名,モデルID,资源目录,模型文件,目录形态数,来源,校验
+// 只认后 4 段里的前 4 列；# 开头为注释，UTF-8（容忍 BOM）。
+static bool LoadMsBindFile(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (data.size() >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB &&
+        (unsigned char)data[2] == 0xBF)
+        data.erase(0, 3);
+    int n = 0;
+    size_t start = 0;
+    while (start <= data.size()) {
+        size_t nl = data.find('\n', start);
+        std::string line = data.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        start = nl == std::string::npos ? data.size() + 1 : nl + 1;
+        if (line.empty() || line[0] == '#') continue;
+        std::vector<std::wstring> c;
+        std::string cur;
+        for (char ch : line) {
+            if (ch == ',') {
+                c.push_back(Widen(cur));
+                cur.clear();
+            } else if (ch != '\r') {
+                cur.push_back(ch);
+            }
+        }
+        c.push_back(Widen(cur));
+        if (c.size() < 4) continue;
+        MsBind b;
+        b.msId = c[0];
+        b.name = c[1];
+        b.modelId = c[2];
+        b.dir = c[3];
+        const size_t sl = b.dir.find_last_of(L'/');
+        b.unit = sl == std::wstring::npos ? b.dir : b.dir.substr(sl + 1);
+        if (!IsAllDigits(b.msId) || !IsFourDigits(b.unit)) continue;
+        g_msBind[b.msId] = b;
+        if (!b.modelId.empty()) g_msBindModel[b.modelId] = b;
+        ++n;
+    }
+    return n > 0;
+}
+
+// 绑定表查找顺序：config.ini 的 paths/ms_bind → exe 目录 ms_bind.csv →
+// 仓库里的 datatables/names/favms_ok_list-资源绑定.csv（exe 在 viewer/ 或 viewer/build/）。
+static void LoadMsBind() {
+    g_msBind.clear();
+    g_msBindModel.clear();
+    g_msBindPath.clear();
+    std::vector<std::filesystem::path> cands;
+    const std::wstring ini = IniGet(L"paths", L"ms_bind");
+    if (!ini.empty()) cands.push_back(ini);
+    cands.push_back(ExeDir() / L"ms_bind.csv");
+    // exe 常落在 viewer/build/Release/ 之类的子目录，逐级向上找仓库里的绑定表。
+    std::filesystem::path up = ExeDir();
+    for (int i = 0; i < 4; ++i) {
+        cands.push_back(up / L"datatables" / L"names" / L"favms_ok_list-资源绑定.csv");
+        if (!up.has_parent_path() || up.parent_path() == up) break;
+        up = up.parent_path();
+    }
+    for (const auto& p : cands) {
+        if (LoadMsBindFile(p)) {
+            g_msBindPath = p.wstring();
+            return;
+        }
+    }
+}
+
+static const MsBind* LookupMsBind(const std::wstring& id) {
+    auto it = g_msBind.find(id);
+    if (it != g_msBind.end()) return &it->second;
+    auto it2 = g_msBindModel.find(id);
+    if (it2 != g_msBindModel.end()) return &it2->second;
+    return nullptr;
+}
+
+// 搜索框里输入纯数字且能在绑定表命中时，切成「按机体 ID 搜」：
+// 練度ID(7 位) / モデルID(9 位) 都认，命中后只显示该机体 chara/<A>/<B>/<C> 下的资源。
+// 把搜索词解析成要定位的资源坐标，填充 g_idDirs / g_idCodes。
+//   ① 9 位数字 = モデルID ⇒ **按规则**拆位算目录（不看表）
+//   ② 7 位数字 = 練度ID ⇒ 两套编号独立（M01 §7.6.4），只能查 ms_bind.csv
+static bool ResolveIdToTargets(const std::wstring& id, std::wstring* detailOut) {
+    g_idDirs.clear();
+    g_idCodes.clear();
+    std::wstring detail;
+    bool ok = false;
+    std::wstring dir;
+    if (ApplyModelIdRule(id, dir)) {
+        detail = L"ID " + id + L"  [rule] -> " + dir;
+        if (!DirExists(ToLower(dir))) detail += L"   (not in resource tree)";
+        if (const MsBind* b = LookupMsBind(id))
+            if (!b->name.empty()) detail += L"   " + b->name;
+        ok = true;
+    } else if (const MsBind* b = LookupMsBind(id)) {
+        AddIdTarget(b->dir);
+        detail = L"ID " + id + L"  [table] = " + b->name;
+        if (!b->modelId.empty()) detail += L"  [モデルID " + b->modelId + L"]";
+        detail += L"  ->  " + b->dir;
+        ok = true;
+    } else if (id.size() == 7 || id.size() == 9) {
+        detail = L"ID " + id + L": no resource found";
+        if (id.size() == 7) detail += L"  (練度ID: separate numbering, needs ms_bind.csv)";
+        else detail += L"  (no chara/0A/B/C for this モデルID)";
+        if (g_msBind.empty() && id.size() == 7) detail += L"  [ms_bind.csv not found]";
+    }
+    if (detailOut) *detailOut = detail;
+    return ok;
+}
+
+static void ResolveIdSearch() {
+    g_idDirs.clear();
+    g_idCodes.clear();
+    g_idDetail.clear();
+    if (!IsAllDigits(g_searchText)) return;
+    ResolveIdToTargets(g_searchText, &g_idDetail);
 }
 
 static std::wstring FileNameOf(const std::wstring& path) {
@@ -1163,7 +1378,13 @@ static void FillList(int node) {
     } else {
         swprintf_s(st, L"%s   %u files (this folder + children)", folder, (unsigned)g_visible.size());
     }
-    SetStatus(st);
+    if (!g_idDetail.empty()) {
+        std::wstring t = g_idDetail + L"   |   ";
+        t += st;
+        SetStatus(t.c_str());
+    } else {
+        SetStatus(st);
+    }
     if (unitNode) {
         auto best = BestUnitPreview(unit);
         if (best.first >= 0) {
@@ -1709,11 +1930,11 @@ static void Layout(HWND hwnd) {
     const int h = rc.bottom - sbH - pad * 2 - barH;
     MoveWindow(g_lblFilter, pad, 8, 36, 20, TRUE);
     MoveWindow(g_filter, pad + 38, 4, 100, 220, TRUE);
-    MoveWindow(g_lblSearch, pad + 148, 8, 44, 20, TRUE);
-    MoveWindow(g_search, pad + 194, 4, 220, 22, TRUE);
-    MoveWindow(g_btnDir, pad + 424, 4, 120, 22, TRUE);
-    MoveWindow(g_chkStruct, pad + 548, 6, 120, 20, TRUE);
-    MoveWindow(g_lblDir, pad + 672, 8, (std::max)(80, (int)rc.right - pad - 680), 20, TRUE);
+    MoveWindow(g_lblSearch, pad + 148, 8, 58, 20, TRUE);
+    MoveWindow(g_search, pad + 208, 4, 230, 22, TRUE);
+    MoveWindow(g_btnDir, pad + 444, 4, 120, 22, TRUE);
+    MoveWindow(g_chkStruct, pad + 568, 6, 120, 20, TRUE);
+    MoveWindow(g_lblDir, pad + 692, 8, (std::max)(80, (int)rc.right - pad - 700), 20, TRUE);
     MoveWindow(g_tree, x, y, treeW, h, TRUE);
     MoveWindow(g_list, x + treeW + pad, y, w - treeW - pad, h, TRUE);
     int parts[2] = {(std::max)(80, (int)rc.right - 250), -1};
@@ -1842,8 +2063,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                                  L".ttc",  L".ttf"};
         for (auto* e : exts) SendMessageW(g_filter, CB_ADDSTRING, 0, (LPARAM)e);
 
-        g_lblSearch = CreateWindowExW(0, L"STATIC", L"Name", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
-                                      (HMENU)ID_LBL_SEARCH, nullptr, nullptr);
+        g_lblSearch = CreateWindowExW(0, L"STATIC", L"ID/Name", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+                                      hwnd, (HMENU)ID_LBL_SEARCH, nullptr, nullptr);
         g_search = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd,
                                    (HMENU)ID_SEARCH, nullptr, nullptr);
@@ -2116,6 +2337,9 @@ static int RunCli(int argc, wchar_t** argv) {
         wprintf(L"  GundamRes.exe                  GUI\n");
         wprintf(L"  GundamRes.exe list <data>      list archives\n");
         wprintf(L"  GundamRes.exe extract <data> <substr> <outdir>\n");
+        wprintf(L"  GundamRes.exe id <data> <id>   list a unit's resources\n");
+        wprintf(L"       <id> = 9-digit model id (rule A|B(2)|C(4)|NN(2) -> chara/0A/B/C)\n");
+        wprintf(L"            | 7-digit msma id (via ms_bind.csv)\n");
         return 1;
     }
     const std::wstring cmd = argv[1];
@@ -2149,6 +2373,36 @@ static int RunCli(int argc, wchar_t** argv) {
         wprintf(L"%d files\n", n);
         return 0;
     }
+    if (cmd == L"id" && argc >= 4) {
+        LoadMsBind();
+        const std::wstring id = argv[3];
+        g_scanDirs.clear();
+        for (const auto& ar : cat.archives) {
+            for (const auto& f : ar.files) {
+                const std::wstring vfs = ToLower(VfsPathOf(ar, f));
+                const size_t sl = vfs.find_last_of(L'/');
+                if (sl != std::wstring::npos) g_scanDirs.insert(vfs.substr(0, sl));
+            }
+        }
+        std::wstring detail;
+        if (!ResolveIdToTargets(id, &detail)) {
+            wprintf(L"%s\n", detail.c_str());
+            return 2;
+        }
+        wprintf(L"%s\n", detail.c_str());
+        int n = 0;
+        for (const auto& ar : cat.archives) {
+            for (const auto& f : ar.files) {
+                const std::wstring vfs = VfsPathOf(ar, f);
+                if (PathMatchesUnit(ToLower(vfs))) {
+                    wprintf(L"%s\n", vfs.c_str());
+                    ++n;
+                }
+            }
+        }
+        wprintf(L"%d files\n", n);
+        return 0;
+    }
     return 1;
 }
 
@@ -2164,6 +2418,8 @@ int wmain(int argc, wchar_t** argv) {
     if (g_bgMode < 0 || g_bgMode > 3) g_bgMode = 0;
     g_exportStruct = IniGet(L"ui", L"export_struct", L"1") != L"0";
     if (g_filterExt == L"(all)" || g_filterExt == L"*") g_filterExt.clear();
+    LoadMsBind();
+    ResolveIdSearch();
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;

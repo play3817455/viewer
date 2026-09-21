@@ -44,3 +44,12 @@ target_link_libraries(GundamRes PRIVATE DirectXTex ole32 windowscodecs d3d9)
 if (MSVC)
     target_compile_options(GundamRes PRIVATE /utf-8 /W3)
 endif()
+
+# 机体ID → 资源 绑定表：由 datatables/build_favms_asset_bind.py 生成，随 exe 一起放一份，
+# 这样双击 GundamRes.exe 时搜索框里的机体 ID 就能直接命中。
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ms_bind.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/ms_bind.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/ms_bind.csv")
+endif()
