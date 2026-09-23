@@ -53,3 +53,21 @@ if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ms_bind.csv")
             "${CMAKE_CURRENT_SOURCE_DIR}/ms_bind.csv"
             "$<TARGET_FILE_DIR:GundamRes>/ms_bind.csv")
 endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ms_weapons.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/ms_weapons.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/ms_weapons.csv")
+endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/item_bind.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/item_bind.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/item_bind.csv")
+endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/item_names.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/item_names.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/item_names.csv")
+endif()

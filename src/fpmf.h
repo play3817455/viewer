@@ -45,6 +45,9 @@ Archive LoadHed(const std::filesystem::path& hedPath);
 using ScanProgressFn = void (*)(unsigned done, unsigned total, const wchar_t* name, void* ctx);
 Catalog ScanDataRoot(const std::filesystem::path& dataRoot,
                      ScanProgressFn progress = nullptr, void* ctx = nullptr);
+// 解包目录（unpackdat 这类裸文件树）：目录里没有 .hed 时用它
+Catalog ScanPlainRoot(const std::filesystem::path& root,
+                      ScanProgressFn progress = nullptr, void* ctx = nullptr);
 
 std::filesystem::path VolumePath(const Archive& ar, uint32_t volume);
 bool VolumeExists(const Archive& ar, uint32_t volume);

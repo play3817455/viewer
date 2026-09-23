@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <system_error>
 
@@ -185,6 +186,44 @@ Catalog ScanDataRoot(const std::filesystem::path& dataRoot, ScanProgressFn progr
     return cat;
 }
 
+// 解包目录模式：递归扫描裸文件（每条一个 FileEntry，虚拟归档 = 根目录本身）。
+// 用于 unpackdat 这类已解包目录 —— 内容比打包的 data/ 全得多。
+// 判定标记 = volume.format == "plain"。
+Catalog ScanPlainRoot(const std::filesystem::path& root, ScanProgressFn progress, void* ctx) {
+    Catalog cat;
+    cat.dataRoot = NormalizeDataRoot(root);
+    if (!std::filesystem::exists(cat.dataRoot)) return cat;
+    Archive ar;
+    ar.hedPath = cat.dataRoot;
+    ar.dataRoot = cat.dataRoot;
+    ar.volume.format = L"plain";
+    const std::wstring base = cat.dataRoot.wstring();
+    std::error_code ec;
+    unsigned n = 0;
+    for (auto it = std::filesystem::recursive_directory_iterator(
+             cat.dataRoot, std::filesystem::directory_options::skip_permission_denied, ec);
+         it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const std::filesystem::path p = it->path();
+        const std::wstring full = p.wstring();
+        std::wstring rel = full.size() > base.size() ? full.substr(base.size() + 1)
+                                                     : p.filename().wstring();
+        for (auto& c : rel)
+            if (c == L'\\') c = L'/';
+        FileEntry fe;
+        fe.path = rel;
+        fe.folder = p.parent_path().wstring();
+        fe.size = static_cast<uint32_t>(it->file_size(ec));
+        ar.files.push_back(std::move(fe));
+        ++n;
+        if (progress && (n % 1024) == 0) progress(n, 0, L"", ctx);
+    }
+    if (progress) progress(n, 0, L"", ctx);
+    cat.archives.push_back(std::move(ar));
+    return cat;
+}
+
 std::wstring NormRel(std::wstring p) {
     for (auto& c : p) {
         if (c == L'\\') c = L'/';
@@ -231,6 +270,7 @@ std::filesystem::path FormatVolumeRel(const Archive& ar, uint32_t volume) {
 }
 
 std::filesystem::path VolumePath(const Archive& ar, uint32_t volume) {
+    if (ar.volume.format == L"plain") return ar.hedPath;   // 解包模式：无 .dat
     const auto rel = FormatVolumeRel(ar, volume);
     const auto name = rel.filename();
     const std::filesystem::path cands[] = {
@@ -248,6 +288,7 @@ std::filesystem::path VolumePath(const Archive& ar, uint32_t volume) {
 }
 
 bool VolumeExists(const Archive& ar, uint32_t volume) {
+    if (ar.volume.format == L"plain") return true;
     std::error_code ec;
     return std::filesystem::exists(VolumePath(ar, volume), ec);
 }
@@ -364,6 +405,12 @@ std::filesystem::path SidecarDir(const Archive& ar, const FileEntry& file) {
 }
 
 std::vector<uint8_t> ExtractFile(const Archive& ar, const FileEntry& file, const Catalog* cat) {
+    if (ar.volume.format == L"plain") {   // 解包模式：直接读磁盘上的裸文件
+        std::ifstream in(ar.hedPath / std::filesystem::path(file.path), std::ios::binary);
+        if (!in) return {};
+        return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+    }
     if (VolumeExists(ar, file.volume)) return ReadVolumeSlice(ar, file);
     if (cat) {
         const Archive* oar = nullptr;
