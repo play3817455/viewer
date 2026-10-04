@@ -108,10 +108,20 @@ static std::map<std::pair<int, int>, std::wstring> g_filePathLower;
 // 两套编号：練度ID(7 位, 机体清单主键) / モデルID(9 位, chara 资源坐标)。
 struct MsBind {
     std::wstring msId;     // 練度ID（7 位）
-    std::wstring name;     // 机体名
+    std::wstring name;     // 机体名（客户端日文名）
     std::wstring modelId;  // モデルID（9 位）
     std::wstring dir;      // chara/01/24/1201
     std::wstring unit;     // 资源目录末段 = C（4 位），与 UnitIdFromPath 取值一致
+    // ↓ 关联信息（datatables/build_favms_asset_bind.py 新增列，人工核对 JSON 带出来的）
+    std::wstring modelFile;  // 主模型文件名 MSM_0101_1001_01.dxg
+    std::wstring src;        // 来源（人工核对 / 全集 / msma_settings …）
+    std::wstring check;      // 校验（OK / NOT_IN_TREE / DIR_ONLY / UNBOUND）
+    std::wstring wiki;       // WIKI 名（中文，人工核对结论）
+    std::wstring type;       // 类型：强袭/重击/支援/砲撃/狙击
+    std::wstring faction;    // 阵营：联邦/吉翁
+    std::wstring iconBig;    // interface/icon/item/d/d0<モデルID>.dds（半身大图）
+    std::wstring iconSmall;  // interface/icon/item/s/s0<モデルID>.dds（列表小图）
+    std::wstring note;       // 备注
 };
 static std::map<std::wstring, MsBind> g_msBind;       // key = 練度ID
 static std::map<std::wstring, MsBind> g_msBindModel;  // key = モデルID
@@ -135,9 +145,21 @@ struct WeaponRef {
     std::wstring slot;   // MAIN / EX
     std::wstring dir;    // item/01/0101
     std::wstring model;  // EM_01_0101_01.dxg（多个用 | 分隔）
+    std::wstring name;   // 武器名（ITEM 表 col2，真实名称）
+    std::wstring basis;  // 依据：真值 / 真值ID / 推定 —— ★配对可信度，见 ms_weapons.csv 表头
 };
 static std::map<std::wstring, std::vector<WeaponRef>> g_msWeapons;  // key = 練度ID
 static std::wstring g_msWeaponsPath;
+
+// 该練度ID 在武器表里是否有能列出来的东西（哪怕机体资源没绑定，武器也该显示）。
+static bool MsHasWeaponAssets(const std::wstring& msId) {
+    if (msId.empty()) return false;
+    auto it = g_msWeapons.find(msId);
+    if (it == g_msWeapons.end()) return false;
+    for (const auto& w : it->second)
+        if (!w.dir.empty() || !w.wid.empty()) return true;
+    return false;
+}
 
 // viewer/item_bind.csv（同生成器）：item/<类>/<号> → 该武器的装备ID
 static std::map<std::wstring, std::wstring> g_itemIdByDir;
@@ -458,6 +480,7 @@ static void ReadFilterUi() {
 static std::wstring VfsPathOf(const fpmf::Archive& ar, const fpmf::FileEntry& e);
 static std::wstring UnitIdFromPath(std::wstring path);
 static bool PathMatchesUnit(const std::wstring& lowerPath);
+static bool PathHasCodeToken(const std::wstring& lowerPath, const std::wstring& codeWithSep);
 
 // 过滤判定统一用 (arch, idx)：路径一律查预建好的 g_filePathLower。
 // ★绝不在过滤阶段调用 VfsPathOf —— 它内部的 std::filesystem::relative 是磁盘 I/O，
@@ -603,18 +626,34 @@ static void AddIdTarget(const std::wstring& dir) {
     if (seg.size() >= 3) g_idCodes.insert(seg[0] + seg[1] + L"_" + seg[2]);
 }
 
+// 图标文件名 = <前缀>0 + 编号（编号不足 7 位时左补 0），实证：
+//   1040101 → d01040101 / s01040101      （7 位原样）
+//   940201  → d00940201                   （6 位补成 7 位）
+//   113180101 → d0113180101               （9 位モデルID 原样）
+// 返回该编号可能的键（含原样，兼容更长编号）。
+static std::vector<std::wstring> IconKeysOf(const std::wstring& id) {
+    std::vector<std::wstring> v{id};
+    if (id.size() < 7) v.push_back(std::wstring(7 - id.size(), L'0') + id);
+    return v;
+}
+
 static bool PathMatchesUnit(const std::wstring& lowerPath) {
     for (const auto& d : g_idDirs)
         if (lowerPath.find(d) != std::wstring::npos) return true;
-    for (const auto& c : g_idCodes)
-        if (lowerPath.find(c) != std::wstring::npos) return true;
+    // 文件名编码匹配（0101_0101）只针对机体资源目录：item/ 下的武器贴图（ET_20_0101_0101_…）
+    // 也会包含同一个编码，属于误配 —— 武器另有自己的目录/图标规则。
+    if (lowerPath.compare(0, 5, L"item/") != 0) {
+        for (const auto& c : g_idCodes)
+            if (lowerPath.find(c) != std::wstring::npos) return true;
+    }
     for (const auto& d : g_itemDirs)
         if (lowerPath.find(d) != std::wstring::npos) return true;
     return false;
 }
 
-// ms_bind.csv 列：練度ID,机体名,モデルID,资源目录,模型文件,目录形态数,来源,校验
-// 只认后 4 段里的前 4 列；# 开头为注释，UTF-8（容忍 BOM）。
+// ms_bind.csv 列（datatables/build_favms_asset_bind.py 生成，共 14 列）：
+//   練度ID,机体名,モデルID,资源目录,模型文件,目录形态数,来源,校验,WIKI名,类型,阵营,大图标,小图标,备注
+// 前 4 列是老口径（必须）；后 10 列是本次新增的关联信息，缺失也照样能跑。
 static bool LoadMsBindFile(const std::filesystem::path& p) {
     std::ifstream f(p, std::ios::binary);
     if (!f) return false;
@@ -636,6 +675,15 @@ static bool LoadMsBindFile(const std::filesystem::path& p) {
         b.name = c[1];
         b.modelId = c[2];
         b.dir = c[3];
+        if (c.size() > 4) b.modelFile = c[4];
+        if (c.size() > 6) b.src = c[6];
+        if (c.size() > 7) b.check = c[7];
+        if (c.size() > 8) b.wiki = c[8];
+        if (c.size() > 9) b.type = c[9];
+        if (c.size() > 10) b.faction = c[10];
+        if (c.size() > 11) b.iconBig = c[11];
+        if (c.size() > 12) b.iconSmall = c[12];
+        if (c.size() > 13) b.note = c[13];
         const size_t sl = b.dir.find_last_of(L'/');
         b.unit = sl == std::wstring::npos ? b.dir : b.dir.substr(sl + 1);
         if (!IsAllDigits(b.msId)) continue;
@@ -698,6 +746,8 @@ static bool ReadMsWeapons(const std::filesystem::path& p) {
         w.slot = c[2];
         w.dir = c[3];
         w.model = c[5];
+        w.name = c.size() > 7 ? c[7] : std::wstring();
+        w.basis = c.size() > 8 ? c[8] : std::wstring();
         g_msWeapons[c[0]].push_back(w);
         ++n;
     }
@@ -725,11 +775,13 @@ static void LoadMsWeapons() {
     }
 }
 
-// 资源目录（chara/01/68/2001）→ 練度ID —— 点树节点时用它反查该机体挂的武器
+// 资源目录（chara/01/68/2001）→ 練度ID —— 点树节点时用它反查该机体挂的武器/图标。
+// ★目录不在绑定表里就返回空：此时挂 g_curMsId 会把**上一台选中机体**的武器/图标混进来
+//   （tree 节点只给得出目录，没有别的线索能推出它属于谁）。
 static std::wstring MsIdByDir(const std::wstring& dir) {
     auto it = g_msByDirLower.find(ToLower(dir));
     if (it != g_msByDirLower.end()) return it->second;
-    return g_curMsId;
+    return L"";
 }
 
 static bool ReadItemBind(const std::filesystem::path& p) {
@@ -882,10 +934,25 @@ static bool ResolveIdToTargets(const std::wstring& id, std::wstring* detailOut,
         auto wit = g_msWeapons.find(id);
         if (wit != g_msWeapons.end() && !wit->second.empty()) g_idMsId = id;
     }
+    // 命中绑定表时，把人工核对带出来的 WIKI 名 / 类型 / 阵营一并显示在状态栏
+    auto metaOf = [](const MsBind* mb) {
+        std::wstring m;
+        if (!mb) return m;
+        if (!mb->wiki.empty()) m += L"  「" + mb->wiki + L"」";
+        if (!mb->type.empty() || !mb->faction.empty()) {
+            m += L"  (";
+            if (!mb->type.empty()) m += mb->type;
+            if (!mb->type.empty() && !mb->faction.empty()) m += L"/";
+            if (!mb->faction.empty()) m += mb->faction;
+            m += L")";
+        }
+        return m;
+    };
     if (ApplyModelIdRule(id, dir) && DirExists(ToLower(dir))) {
         // 9 位モデルID → chara 资源
         detail = L"ID " + id + L"  [model] -> " + dir;
         if (b && !b->name.empty()) detail += L"   " + b->name;
+        detail += metaOf(b);
         outDir = dir;
         ok = true;
     } else if (b && !b->dir.empty() && DirExists(ToLower(b->dir))) {
@@ -893,16 +960,25 @@ static bool ResolveIdToTargets(const std::wstring& id, std::wstring* detailOut,
         AddIdTarget(b->dir);
         detail = L"ID " + id + L"  [table] = " + b->name;
         if (!b->modelId.empty()) detail += L"  [モデルID " + b->modelId + L"]";
+        detail += metaOf(b);
         detail += L"  ->  " + b->dir;
         outDir = b->dir;
         ok = true;
     } else {
         g_idDirs.clear();
         g_idCodes.clear();
-        const std::wstring idir = ItemDirOfId(id);
+        // ★7 位 ID 若已经是「机体」（在 msma_weapon_set 里有行），就**不要再当装备ID**去反推
+        //   item/<类>/<号> —— 那样会把 item/01/7011 之类**碰巧同名**的武器目录挂到机体上
+        //   （实测 1117011 这类未绑定机体就会串到别人的武器上）。宁可只报"资源未绑定"。
+        const bool isKnownLid = id.size() == 7 && g_msWeapons.count(id) > 0;
+        const std::wstring idir = isKnownLid ? L"" : ItemDirOfId(id);
         if (!idir.empty()) {
-            // 装备ID（武器/道具）→ item 资源
+            // 装备ID（武器/道具）→ item 资源 + 该装备的大/小图标
             g_itemDirs.insert(ToLower(idir));
+            for (const auto& k : IconKeysOf(id)) {
+                g_idDirs.insert(L"interface/icon/item/d/d0" + k + L".dds");
+                g_idDirs.insert(L"interface/icon/item/s/s0" + k + L".dds");
+            }
             detail = L"ID " + id + L"  [weapon] -> " + idir;
             outDir = idir;
             ok = true;
@@ -911,7 +987,13 @@ static bool ResolveIdToTargets(const std::wstring& id, std::wstring* detailOut,
             g_idCodes.clear();
             detail = L"ID " + id + L": no resource (model id would be " + dir + L")";
         } else if (b) {
-            detail = L"ID " + id + L" = " + b->name + L"   (no resource bound)";
+            // 绑定表给了目录但磁盘上没有（客户端根本没打包这套模型）：说清楚，别只说"未绑定"
+            detail = L"ID " + id + L" = " + b->name;
+            if (!b->modelId.empty()) detail += L"  [モデルID " + b->modelId + L"]";
+            detail += L"   (no resource bound";
+            if (!b->dir.empty()) detail += L": " + b->dir + L" not found";
+            else if (!b->modelId.empty()) detail += L": model " + b->modelId + L" not in this build";
+            detail += L")";
         } else if (id.size() == 7 || id.size() == 9) {
             detail = L"ID " + id + L": no resource found";
             if (id.size() == 7 && g_msBind.empty()) detail += L"  [ms_bind.csv not found]";
@@ -934,7 +1016,9 @@ static void ResolveIdSearch() {
     g_idMode = false;
     if (!IsAllDigits(g_searchText)) return;
     std::wstring dir;
-    if (ResolveIdToTargets(g_searchText, &g_idDetail, &dir) && !dir.empty()) {
+    // dir 为空时也可能有得列：机体资源未绑定、但武器表里有这台（只列武器+图标）
+    if (ResolveIdToTargets(g_searchText, &g_idDetail, &dir) &&
+        (!dir.empty() || MsHasWeaponAssets(g_idMsId))) {
         g_idDir = dir;
         g_idMode = true;
     }
@@ -1012,6 +1096,22 @@ static std::wstring FileCodeOfDir(const std::wstring& dir) {
     if (seg.size() >= 4 && seg[0] == L"chara") return seg[1] + seg[2] + L"_" + seg[3];
     if (seg.size() >= 3 && seg[0] == L"item") return seg[1] + L"_" + seg[2];
     return L"";
+}
+
+// 文件名里是否含 "<编码>_"，且编码**自成一段**（前一个字符必须是 '_' 或就是开头）。
+// 为什么必须这样判：武器编码短（"01_0201"），拿它去 find() 会命中别的东西 ——
+//   · MSA_0101_0201_21001.MRB 里含 "01_0201_"（前面是 '1'）⇒ 误把机体动画当武器资源
+//   · ET_20_0101_0101_01C.dds 里含 "01_0101_"（前面是 '1'）⇒ 误把别人的武器贴图挂上来
+// 加上前导 '_' 判据后：EM_01_0201_01.dxg / ET_01_0201_01C.dds / MST_0101_0201_01C.dds 都仍然命中。
+static bool PathHasCodeToken(const std::wstring& lowerPath, const std::wstring& codeWithSep) {
+    if (codeWithSep.empty()) return false;
+    const std::wstring fn = FileNameOf(lowerPath);
+    size_t p = fn.find(codeWithSep);
+    while (p != std::wstring::npos) {
+        if (p == 0 || fn[p - 1] == L'_') return true;
+        p = fn.find(codeWithSep, p + 1);
+    }
+    return false;
 }
 
 static bool LooksLikeUnitNode(int node) {
@@ -1714,26 +1814,37 @@ static void FillIdList() {
 }
 
 // 一次列出该 ID 的全部相关资源（不重建树、不遍历全库 ⇒ 不卡）：
-//   ① 该资源目录下的全部文件
+//   ① 该资源目录下的全部文件（机体：model/attr/tex/anim）
 //   ② 同 unit 的关联文件 —— 与详情页同一套口径（UnitIdFromPath：4 位 leaf，
 //      或文件名里的 <A><B>_<C> 编码），会跨 B 段把同编号的贴图/动画一起带上
-//   ③ 该机体挂的武器模型（每行带武器ID）
+//   ③ 机体图标：interface/icon/item/d|s/d0|s0<モデルID>.dds + interface/icon/color/c0<モデルID>_*.dds
+//   ④ 该机体挂的武器：整套资源（model/attr/tex）+ 武器大/小图标 d0|s0<武器ID>.dds
 static void FillListForDir(const std::wstring& dir, const std::wstring& msId) {
     LogW(L"FillListForDir dir=" + dir + L" msId=" + msId);
     g_visible.clear();
     g_rowId.clear();
-    if (g_cat.archives.empty() || dir.empty()) {
+    if (g_cat.archives.empty()) {
         if (g_list) ListView_SetItemCountEx(g_list, 0, LVSICF_NOSCROLL);
         SetStatus(g_idDetail.c_str());
         return;
     }
     std::set<std::pair<int, int>> seen;
+    int nIcon = 0;      // 机体图标（大图/小图/配色）
+    int nWeapon = 0;    // 武器整套资源（model/attr/tex）
+    int nGuess = 0;     // 其中"配对未证实"（依据=推定）的武器数 —— 状态栏要如实标出来
     auto add = [&](const std::pair<int, int>& pr) {
         if (pr.first < 0 || pr.first >= (int)g_cat.archives.size()) return;
         if (pr.second < 0 || pr.second >= (int)g_cat.archives[pr.first].files.size()) return;
         if (!seen.insert(pr).second) return;
         g_visible.push_back(pr);
     };
+    // dir 为空（机体资源没绑定）但挂得有武器：照样列武器 —— 见下面 ④
+    const bool weaponsOnly = dir.empty() && MsHasWeaponAssets(msId);
+    if ((dir.empty() && !weaponsOnly)) {
+        if (g_list) ListView_SetItemCountEx(g_list, 0, LVSICF_NOSCROLL);
+        SetStatus(g_idDetail.c_str());
+        return;
+    }
     const std::wstring prefix = ToLower(dir) + L"/";
     if (!dir.empty() && !g_pathIndex.empty()) {
         for (auto it = g_pathIndex.lower_bound(prefix);
@@ -1746,38 +1857,120 @@ static void FillListForDir(const std::wstring& dir, const std::wstring& msId) {
     //      按编号匹配会把别的机体整套塞进来。
     const std::wstring code = FileCodeOfDir(dir);
     if (!code.empty() && !g_pathIndex.empty()) {
-        for (const auto& kv : g_pathIndex)
-            if (kv.first.find(code) != std::wstring::npos) add(kv.second);
+        const std::wstring codeWithSep = code + L"_";
+        for (const auto& kv : g_pathIndex) {
+            // item/ 下的武器贴图（ET_20_0101_0101_…）也含同一个编码，属误配 —— 武器走 ④。
+            if (kv.first.compare(0, 5, L"item/") == 0) continue;
+            if (PathHasCodeToken(kv.first, codeWithSep)) add(kv.second);
+        }
     }
+    // ③ 机体图标：机体大图/小图的文件名里带 モデルID（不含机体编码），所以得按 ID 单独找。
+    //    interface/icon/item/d/d0<モデルID>.dds  半身大图
+    //    interface/icon/item/s/s0<モデルID>.dds  列表小图
+    //    interface/icon/color/c0<モデルID>_<nnn>.dds  涂装配色（001~）
+    const MsBind* selfBind = nullptr;
+    if (!msId.empty()) {
+        auto bit = g_msBind.find(msId);
+        if (bit != g_msBind.end())
+            selfBind = &bit->second;
+        else {
+            auto mit = g_msBindModel.find(msId);   // 传进来的可能直接就是 9 位モデルID
+            if (mit != g_msBindModel.end()) selfBind = &mit->second;
+        }
+    }
+    if (selfBind && !selfBind->modelId.empty()) {
+        const std::wstring& mid = selfBind->modelId;
+        // 优先用绑定表里写好的一列（人工核对生成的），没有就按命名律现算；命中即止。
+        const std::wstring iconCands[2][2] = {
+            {selfBind->iconBig, L"interface/icon/item/d/d0" + mid + L".dds"},
+            {selfBind->iconSmall, L"interface/icon/item/s/s0" + mid + L".dds"},
+        };
+        for (const auto& cands : iconCands) {
+            for (const auto& p : cands) {
+                if (p.empty()) continue;
+                auto ref = FindByVfsPath(p);
+                if (ref.first >= 0) {
+                    add(ref);
+                    ++nIcon;
+                    break;
+                }
+            }
+        }
+        const std::wstring cpfx = L"interface/icon/color/c0" + mid + L"_";
+        if (!g_pathIndex.empty()) {
+            for (auto it = g_pathIndex.lower_bound(cpfx);
+                 it != g_pathIndex.end() && it->first.compare(0, cpfx.size(), cpfx) == 0; ++it) {
+                add(it->second);
+                ++nIcon;
+            }
+        }
+    }
+    // ④ 该机体挂的武器：整套资源一起列（model/EM_*.dxg + attr/EZ_*.vra + tex/ET_*.dds），
+    //    外加武器大/小图标 d0|s0<武器ID>.dds。每行带武器ID/槽位/名称，便于核对。
     if (!msId.empty()) {
         auto wit = g_msWeapons.find(msId);
         if (wit != g_msWeapons.end()) {
             for (const auto& w : wit->second) {
-                if (w.dir.empty() || w.model.empty()) continue;
-                std::wstring model = w.model;
-                const size_t bar = model.find(L'|');
-                if (bar != std::wstring::npos) model.resize(bar);
-                if (model.empty()) continue;
-                const std::wstring wp = ToLower(w.dir + L"/model/" + model);
-                auto ref = FindByVfsPath(wp);
-                if (ref.first < 0 && !g_pathIndex.empty()) {   // 兜底：该武器目录里按文件名找
+                if (w.dir.empty() && w.wid.empty()) continue;
+                std::wstring tag = w.wid;
+                if (!w.slot.empty()) tag += L" " + w.slot;
+                // 名称：优先用表里带出的 ITEM 表真名，其次本地 item_names.csv
+                std::wstring nm = w.name;
+                if (nm.empty()) {
+                    auto nit = g_itemNames.find(w.wid);
+                    if (nit != g_itemNames.end()) nm = nit->second;
+                }
+                if (!nm.empty()) tag += L" " + nm;
+                // ★配对可信度：推定 = 该机体↔该武器的对应没有客户端来源佐证（构造式切片），
+                //   必须显式标出来，不能让人以为这是结论。
+                if (w.basis == L"推定") {
+                    tag += L"  ⚠推定";
+                    ++nGuess;
+                } else if (!w.basis.empty()) {
+                    tag += L"  [" + w.basis + L"]";
+                }
+                int added = 0;
+                // 整套资源：该武器目录里文件名带 "<类>_<号>_" 的全部形态
+                // （item/01/0101 → "01_0101_" ⇒ EM_01_0101_01.dxg / EZ_… / ET_…dds）
+                const std::wstring wcode = FileCodeOfDir(w.dir);
+                if (!wcode.empty() && !g_pathIndex.empty()) {
+                    const std::wstring needle = wcode + L"_";
                     const std::wstring wpfx = ToLower(w.dir) + L"/";
                     for (auto it2 = g_pathIndex.lower_bound(wpfx);
                          it2 != g_pathIndex.end() && it2->first.compare(0, wpfx.size(), wpfx) == 0;
                          ++it2) {
-                        if (FileNameOf(it2->first) == FileNameOf(wp)) {
-                            ref = it2->second;
-                            break;
+                        if (!PathHasCodeToken(it2->first, needle)) continue;
+                        add(it2->second);
+                        g_rowId[it2->second] = tag;
+                        ++added;
+                        ++nWeapon;
+                    }
+                }
+                // 兜底（老口径）：表里给的模型文件名，按目录里同名文件找
+                if (!added && !w.model.empty()) {
+                    std::wstring model = w.model;
+                    const size_t bar = model.find(L'|');
+                    if (bar != std::wstring::npos) model.resize(bar);
+                    auto ref = FindByVfsPath(ToLower(w.dir + L"/model/" + model));
+                    if (ref.first >= 0) {
+                        add(ref);
+                        g_rowId[ref] = tag;
+                    }
+                }
+                // 武器图标（大/小）：interface/icon/item/<d|s>/<d0|s0><武器ID>.dds
+                if (!w.wid.empty()) {
+                    const wchar_t* kWIco[][2] = {{L"d", L"d0"}, {L"s", L"s0"}};
+                    for (const auto& pp : kWIco) {
+                        for (const auto& k : IconKeysOf(w.wid)) {
+                            auto ref = FindByVfsPath(std::wstring(L"interface/icon/item/") + pp[0] +
+                                                     L"/" + pp[1] + k + L".dds");
+                            if (ref.first >= 0) {
+                                add(ref);
+                                g_rowId[ref] = tag;
+                            }
                         }
                     }
                 }
-                if (ref.first < 0) continue;
-                add(ref);
-                std::wstring tag = w.wid;
-                if (!w.slot.empty()) tag += L" " + w.slot;
-                auto nit = g_itemNames.find(w.wid);
-                if (nit != g_itemNames.end() && !nit->second.empty()) tag += L" " + nit->second;
-                g_rowId[ref] = tag;
             }
         }
     }
@@ -1800,17 +1993,23 @@ static void FillListForDir(const std::wstring& dir, const std::wstring& msId) {
     ListView_SetItemCountEx(g_list, (int)g_visible.size(), LVSICF_NOSCROLL);
     ListView_SetItemState(g_list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
     InvalidateRect(g_list, nullptr, TRUE);
-    wchar_t st[280];
-    swprintf_s(st, L"%s   %u files", dir.c_str(), (unsigned)g_visible.size());
+    std::wstring stw = (dir.empty() ? std::wstring(L"(机体资源未绑定)") : dir) + L"   " +
+                       std::to_wstring(g_visible.size()) + L" files";
+    if (nIcon) stw += L"  · 机体图标 " + std::to_wstring(nIcon);
+    if (nWeapon) {
+        stw += L"  · 武器资源 " + std::to_wstring(nWeapon);
+        // 依据=推定的武器并非"已证实属于这台机体"，状态栏必须写清楚
+        if (nGuess) stw += L"（其中 " + std::to_wstring(nGuess) + L" 把配对未证实 ⚠推定）";
+    }
     if (!g_idDetail.empty()) {
         std::wstring t = g_idDetail + L"   |   ";
-        t += st;
+        t += stw;
         SetStatus(t.c_str());
     } else {
-        SetStatus(st);
+        SetStatus(stw.c_str());
     }
-    LogW(L"  ShowIdResult -> files=" + std::to_wstring(g_visible.size()) + L" weapons=" +
-         std::to_wstring(g_rowId.size()));
+    LogW(L"  ShowIdResult -> files=" + std::to_wstring(g_visible.size()) + L" icons=" +
+         std::to_wstring(nIcon) + L" weapons=" + std::to_wstring(nWeapon));
     // 自动预览：优先选中「该资源目录自己 model/ 下的 DXG」，别被关联来的文件抢走
     int pick = -1, fallback = -1;
     const std::wstring modelPrefix = prefix + L"model/";
@@ -1842,13 +2041,16 @@ static void SelectMsId(const std::wstring& id) {
     if (id == g_curMsId && !g_visible.empty()) return;   // 选中/聚焦会多次触发，别重复重算
     g_curMsId = id;
     std::wstring detail, dir;
-    const bool ok = ResolveIdToTargets(id, &detail, &dir);
+    const bool resolved = ResolveIdToTargets(id, &detail, &dir);
+    // 机体资源没绑定、但武器表里登记了这台 ⇒ 也要能列（只列武器 + 武器图标）
+    const bool ok = resolved || MsHasWeaponAssets(g_idMsId);
     g_idDetail = detail;
     g_idDir = dir;
     g_idMode = ok;
     if (!ok) {
-        // 机体没绑定资源也照样把武器库列出来（人工建数据用），状态栏保留提示
-        FillListForDir(L"", g_idMsId);
+        g_visible.clear();
+        g_rowId.clear();
+        if (g_list) ListView_SetItemCountEx(g_list, 0, LVSICF_NOSCROLL);
         SetStatus(detail.c_str());
         return;
     }
@@ -2385,7 +2587,7 @@ static void Layout(HWND hwnd) {
     const int sbH = sb.bottom - sb.top;
     const int pad = 6;
     const int barH = 28;
-    const int idW = 260;     // 侧栏：机体 ID 列表
+    const int idW = 404;     // 侧栏：机体 ID 列表（MS ID / 名称 / WIKI / 类型·阵营 / モデルID）
     const int treeW = 240;
     const int x = pad, y = pad + barH;
     const int w = rc.right - pad * 2;
@@ -2553,14 +2755,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             LVCOLUMNW ic{};
             ic.mask = LVCF_TEXT | LVCF_WIDTH;
             ic.pszText = (LPWSTR)L"MS ID";
-            ic.cx = 64;
+            ic.cx = 62;
             ListView_InsertColumn(g_idList, 0, &ic);
             ic.pszText = (LPWSTR)L"Name";
-            ic.cx = 110;
+            ic.cx = 104;
             ListView_InsertColumn(g_idList, 1, &ic);
-            ic.pszText = (LPWSTR)L"Model ID";
-            ic.cx = 80;
+            ic.pszText = (LPWSTR)L"WIKI";
+            ic.cx = 92;
             ListView_InsertColumn(g_idList, 2, &ic);
+            ic.pszText = (LPWSTR)L"类型/阵营";
+            ic.cx = 74;
+            ListView_InsertColumn(g_idList, 3, &ic);
+            ic.pszText = (LPWSTR)L"モデルID";
+            ic.cx = 72;
+            ListView_InsertColumn(g_idList, 4, &ic);
         }
         g_tree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
                                  WS_CHILD | WS_VISIBLE | TVS_HASLINES | TVS_LINESATROOT |
@@ -2754,19 +2962,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (di->item.iItem < 0 || di->item.iItem >= (int)g_idRows.size()) return 0;
             const MsBind& b = g_idRows[di->item.iItem];
             if (di->item.mask & LVIF_TEXT) {
-                const wchar_t* src = L"";
+                std::wstring s;
                 switch (di->item.iSubItem) {
                 case 0:
-                    src = b.msId.c_str();
+                    s = b.msId;
                     break;
                 case 1:
-                    src = b.name.c_str();
+                    s = b.name.empty() ? b.wiki : b.name;
                     break;
                 case 2:
-                    src = b.modelId.c_str();
+                    s = b.wiki;
+                    break;
+                case 3:
+                    s = b.type;
+                    if (!b.faction.empty()) s += (s.empty() ? L"" : L"/") + b.faction;
+                    break;
+                case 4:
+                    s = b.modelId;
                     break;
                 }
-                wcsncpy_s(di->item.pszText, di->item.cchTextMax, src, _TRUNCATE);
+                wcsncpy_s(di->item.pszText, di->item.cchTextMax, s.c_str(), _TRUNCATE);
             }
             return 0;
         }
@@ -2862,6 +3077,8 @@ static int RunCli(int argc, wchar_t** argv) {
         wprintf(L"  GundamRes.exe id <data> <id>   list a unit's resources\n");
         wprintf(L"       <id> = 9-digit model id (rule A|B(2)|C(4)|NN(2) -> chara/0A/B/C)\n");
         wprintf(L"            | 7-digit msma id (via ms_bind.csv)\n");
+        wprintf(L"       lists MS model/attr/tex/anim + MS icons (d0/s0/c0<model id>)\n");
+        wprintf(L"             + equipped weapons (full model/attr/tex) + weapon icons\n");
         return 1;
     }
     const std::wstring cmd = argv[1];
@@ -2914,13 +3131,53 @@ static int RunCli(int argc, wchar_t** argv) {
             // 机体资源没绑定也不代表没武器：msma_weapon_set.csv 覆盖 656 台，比资源绑定更广
             wprintf(L"%s\n", detail.c_str());
             if (g_idMsId.empty()) return 2;
+        } else {
+            wprintf(L"%s\n", detail.c_str());
         }
-        wprintf(L"%s\n", detail.c_str());
+        // 机体图标（大图/小图/配色）路径里不含机体编码，得按 モデルID 单独补进来
+        if (!g_idMsId.empty()) {
+            auto bit = g_msBind.find(g_idMsId);
+            if (bit != g_msBind.end() && !bit->second.modelId.empty()) {
+                const std::wstring& mid = bit->second.modelId;
+                g_idDirs.insert(L"interface/icon/item/d/d0" + mid + L".dds");
+                g_idDirs.insert(L"interface/icon/item/s/s0" + mid + L".dds");
+                g_idDirs.insert(L"interface/icon/color/c0" + mid + L"_");
+            }
+            // 武器图标：d0|s0<武器ID>.dds（武器整套资源在 item/<类>/<号>/ 下，按下面的编码过滤）
+            auto wit0 = g_msWeapons.find(g_idMsId);
+            if (wit0 != g_msWeapons.end()) {
+                for (const auto& w : wit0->second) {
+                    if (w.wid.empty()) continue;
+                    for (const auto& k : IconKeysOf(w.wid)) {
+                        g_idDirs.insert(L"interface/icon/item/d/d0" + k + L".dds");
+                        g_idDirs.insert(L"interface/icon/item/s/s0" + k + L".dds");
+                    }
+                }
+            }
+        }
+        // 武器整套资源（model/attr/tex）按「文件名编码」过滤 —— 与 GUI 的 ④ 同一口径
+        std::set<std::wstring> weaponNeedles;
+        {
+            auto wit1 = g_msWeapons.find(g_idMsId);
+            if (wit1 != g_msWeapons.end())
+                for (const auto& w : wit1->second) {
+                    const std::wstring c = FileCodeOfDir(w.dir);
+                    if (!c.empty()) weaponNeedles.insert(c + L"_");
+                }
+        }
         int n = 0;
         for (const auto& ar : cat.archives) {
             for (const auto& f : ar.files) {
                 const std::wstring vfs = VfsPathOf(ar, f);
-                if (PathMatchesUnit(ToLower(vfs))) {
+                const std::wstring low = ToLower(vfs);
+                bool hit = PathMatchesUnit(low);
+                if (!hit)
+                    for (const auto& nd : weaponNeedles)
+                        if (PathHasCodeToken(low, nd)) {
+                            hit = true;
+                            break;
+                        }
+                if (hit) {
                     wprintf(L"%s\n", vfs.c_str());
                     ++n;
                 }
@@ -2930,13 +3187,24 @@ static int RunCli(int argc, wchar_t** argv) {
         if (!g_idMsId.empty()) {   // 该机体挂的武器（诊断：资源能不能对上）
             auto wit = g_msWeapons.find(g_idMsId);
             if (wit != g_msWeapons.end()) {
+                int nG = 0;
                 for (const auto& w : wit->second) {
-                    auto nit = g_itemNames.find(w.wid);
-                    wprintf(L"  weapon %s [%s] %s  %s %s\n", w.wid.c_str(),
+                    std::wstring nm = w.name;
+                    if (nm.empty()) {
+                        auto nit = g_itemNames.find(w.wid);
+                        if (nit != g_itemNames.end()) nm = nit->second;
+                    }
+                    const wchar_t* bz = w.basis == L"推定" ? L"  ⚠配对未证实"
+                                        : (w.basis.empty() ? L"" : L"[真值]");
+                    if (w.basis == L"推定") ++nG;
+                    wprintf(L"  weapon %s [%s] %s  %s %s%s\n", w.wid.c_str(),
                             w.slot.empty() ? L"-" : w.slot.c_str(),
-                            (nit != g_itemNames.end() ? nit->second.c_str() : L"?"), w.dir.c_str(),
-                            (w.dir.empty() || !DirExists(ToLower(w.dir))) ? L"(missing)" : L"(ok)");
+                            (nm.empty() ? L"?" : nm.c_str()), w.dir.c_str(),
+                            (w.dir.empty() || !DirExists(ToLower(w.dir))) ? L"(missing)" : L"(ok)", bz);
                 }
+                if (nG)
+                    wprintf(L"  ⚠ 上面 %d 把武器的「机体↔武器」配对来自 msma_weapon_set.csv，"
+                            L"客户端无佐证，属推定值，勿当结论。\n", nG);
             }
         }
         return 0;
