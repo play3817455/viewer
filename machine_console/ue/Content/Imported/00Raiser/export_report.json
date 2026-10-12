@@ -1,0 +1,17 @@
+{
+  "sourceModel": "F:\\9ymsgo\\9you\\机动战士敢达Online\\GundamOnline\\unpackdat\\chara\\01\\84\\3021\\model\\MSM_0184_3021_01.dxg",
+  "sourceMaterial": "F:\\9ymsgo\\9you\\机动战士敢达Online\\GundamOnline\\unpackdat\\chara\\01\\84\\3021\\attr\\MSZ_0184_3021_01.vra",
+  "meshes": 11,
+  "bones": 55,
+  "materials": 4,
+  "textures": 3,
+  "animations": 597,
+  "skinnedMeshes": 11,
+  "unitScale": 0.01,
+  "notes": [
+    "DXG/VRA/MRB parsers reused from iconmatch without modifying it",
+    "DXG spatial units were scaled by 0.01 to glTF meters for UE centimeter import; verify visually in UE",
+    "MRB rotation keys exported as individually named clips; action IDs remain manually selectable and are not guessed",
+    "Additive materials are represented as alpha blend; exact additive appearance needs UE material adjustment"
+  ]
+}
