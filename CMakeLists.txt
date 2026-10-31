@@ -1,0 +1,73 @@
+cmake_minimum_required(VERSION 3.16)
+project(GundamRes LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(DXTEX ${CMAKE_CURRENT_SOURCE_DIR}/third_party/DirectXTex/DirectXTex)
+add_library(DirectXTex STATIC
+    ${DXTEX}/BC.cpp
+    ${DXTEX}/BC4BC5.cpp
+    ${DXTEX}/BC6HBC7.cpp
+    ${DXTEX}/DirectXTexCompress.cpp
+    ${DXTEX}/DirectXTexConvert.cpp
+    ${DXTEX}/DirectXTexDDS.cpp
+    ${DXTEX}/DirectXTexFlipRotate.cpp
+    ${DXTEX}/DirectXTexHDR.cpp
+    ${DXTEX}/DirectXTexImage.cpp
+    ${DXTEX}/DirectXTexMipmaps.cpp
+    ${DXTEX}/DirectXTexMisc.cpp
+    ${DXTEX}/DirectXTexNormalMaps.cpp
+    ${DXTEX}/DirectXTexPMAlpha.cpp
+    ${DXTEX}/DirectXTexResize.cpp
+    ${DXTEX}/DirectXTexTGA.cpp
+    ${DXTEX}/DirectXTexUtil.cpp
+    ${DXTEX}/DirectXTexWIC.cpp
+)
+target_include_directories(DirectXTex PUBLIC ${DXTEX})
+target_compile_definitions(DirectXTex PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00)
+if (MSVC)
+    target_compile_options(DirectXTex PRIVATE /utf-8 /W3 /wd4061 /wd4365 /wd4668 /wd5219 /bigobj)
+endif()
+
+add_executable(GundamRes
+    src/main.cpp
+    src/fpmf.cpp
+    src/image_io.cpp
+    src/dxg.cpp
+    src/anim.cpp
+    src/vra_text.cpp
+    src/preview3d.cpp
+)
+target_include_directories(GundamRes PRIVATE src)
+target_compile_definitions(GundamRes PRIVATE UNICODE _UNICODE NOMINMAX)
+target_link_libraries(GundamRes PRIVATE DirectXTex ole32 windowscodecs d3d9)
+if (MSVC)
+    target_compile_options(GundamRes PRIVATE /utf-8 /W3)
+endif()
+
+# 机体ID → 资源 绑定表：由 datatables/build_favms_asset_bind.py 生成，随 exe 一起放一份，
+# 这样双击 GundamRes.exe 时搜索框里的机体 ID 就能直接命中。
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ms_bind.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/ms_bind.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/ms_bind.csv")
+endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ms_weapons.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/ms_weapons.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/ms_weapons.csv")
+endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/item_bind.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/item_bind.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/item_bind.csv")
+endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/item_names.csv")
+    add_custom_command(TARGET GundamRes POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/item_names.csv"
+            "$<TARGET_FILE_DIR:GundamRes>/item_names.csv")
+endif()
