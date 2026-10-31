@@ -1,0 +1,504 @@
+{
+  "dxg": {
+    "enumerated_files": 17355,
+    "metrics": {
+      "bad_chunk_bounds": 65,
+      "bad_name_table": 3,
+      "files": 17355,
+      "non_mesh_type1_records": 2036,
+      "shape_records": 98823,
+      "type1_chunks": 100316,
+      "type1_records": 100316,
+      "valid_mesh_blocks": 98280
+    }
+  },
+  "dxg_anomaly_files": {
+    "bad_chunk_bounds": [
+      "chara/03/06/0101/model/BSM_0306_0101_26.dxg",
+      "chara/03/13/0101/model/BSM_0313_0101_33.dxg",
+      "chara/03/13/0101/model/BSM_0313_0101_34.dxg",
+      "chara/06/01/0301/model/BAM_0601_0301_22.dxg",
+      "chara/06/30/2606/model/BAM_0630_2606_02.dxg",
+      "chara/06/30/9901/model/BAM_0630_9901_01.dxg",
+      "chara/06/30/9901/model/BMZ_0630_9901_01.dxg",
+      "item/02/001500/model/EM_02_001500_01.dxg",
+      "item/02/001500/model/EM_02_001500_02.dxg",
+      "item/09/2403/model/EM_09_2403_01.dxg",
+      "item/13/7103/model/EM_13_7103_01.dxg",
+      "item/13/7103/model/EM_13_7103_02.dxg",
+      "scene/common/01/lose/001/model/EVM_C01_L001.dxg",
+      "scene/common/01/win/001/model/EVM_C01_W001.dxg",
+      "scene/common/02/lose/001/model/EVM_C02_L001.dxg",
+      "scene/common/02/win/001/model/EVM_C02_W001.dxg",
+      "scene/mission/01/event/001/model/EVM_M01_E001.dxg",
+      "scene/mission/01/lose/001/model/EVM_M01_L001.dxg",
+      "scene/mission/01/win/001/model/EVM_M01_W001.dxg",
+      "scene/mission/02/lose/001/model/EVM_M02_L001.dxg",
+      "scene/op/model/OPM_C01.dxg",
+      "scene/op/model/OPM_C03.dxg",
+      "scene/op/model/OPM_C05.dxg",
+      "scene/op/model/OPM_C06.dxg",
+      "scene/op/model/OPM_C07.dxg",
+      "scene/op/model/OPM_C08.dxg",
+      "scene/op/model/OPM_C09.dxg",
+      "scene/op/model/OPM_C10.dxg",
+      "scene/op3/model/OPM_C01.dxg",
+      "scene/op3/model/OPM_C02.dxg",
+      "scene/op3/model/OPM_C03.dxg",
+      "scene/op3/model/OPM_C04.dxg",
+      "scene/op3/model/OPM_C05.dxg",
+      "scene/op3/model/OPM_C06.dxg",
+      "scene/op3/model/OPM_C07.dxg",
+      "scene/op3/model/OPM_C08.dxg",
+      "scene/op3/model/OPM_C09.dxg",
+      "scene/op3/model/OPM_C10.dxg",
+      "scene/op3/model/OPM_C11.dxg",
+      "scene/op3/model/OPM_C12.dxg",
+      "scene/op3/model/OPM_C13.dxg",
+      "world/object/98/model/OM_98_th_box01A.dxg",
+      "world/object/98/model/OM_98_th_box01B.dxg",
+      "world/object/98/model/OM_98_wv_box01A.dxg",
+      "world/object/98/model/OM_98_wv_box01B.dxg",
+      "world/object/98/model/OM_98_wv_box01C.dxg",
+      "world/object/98/model/OM_98_wv_box01D.dxg",
+      "world/object/98/model/OM_98_wv_box01E.dxg",
+      "world/object/98/model/OM_98_wv_box01F.dxg",
+      "world/object/98/model/OM_98_wv_box02B.dxg",
+      "world/object/98/model/OM_98_wv_box02C.dxg",
+      "world/object/98/model/OM_98_wv_box02D.dxg",
+      "world/object/98/model/OM_98_wv_box02E.dxg",
+      "world/object/98/model/OM_98_wv_box02F.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox01A.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox01C.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox01D.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox02A.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox02B.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox02C.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox02D.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox02E.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox04A.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox04B.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox04C.dxg"
+    ],
+    "bad_name_table": [
+      "chara/06/30/2001/model/BAM_0630_2001_02.dxg",
+      "world/object/98/model/OZ_98_ko_2ndbox01B.dxg",
+      "world/object/F13/model/OZ_F13tanker_sukima_col.dxg"
+    ]
+  },
+  "dxg_attr_pairs": {
+    "counts": {
+      "chara_geometry_match": 6,
+      "chara_models": 1666,
+      "chara_paired": 1653,
+      "chara_prefix_mapped": 1643,
+      "chara_same_stem_fallback": 4,
+      "fx_models": 785,
+      "fx_paired": 781,
+      "fx_prefix_mapped": 758,
+      "item_models": 2918,
+      "item_paired": 2918,
+      "item_prefix_mapped": 2917,
+      "item_same_stem_fallback": 1,
+      "other_models": 31,
+      "other_paired": 31,
+      "other_prefix_mapped": 31,
+      "world_geometry_match": 14,
+      "world_models": 11731,
+      "world_paired": 11706,
+      "world_prefix_mapped": 10048,
+      "world_same_stem_fallback": 26
+    },
+    "unpaired_examples": {
+      "chara": [
+        "chara/02/26/0101/model/MAM_0226_0111_01.dxg -> chara/02/26/0101/attr/maz_0226_0111_01.vra",
+        "chara/03/14/0111/model/BSM_0314_0101_02.dxg -> chara/03/14/0111/attr/bsz_0314_0101_02.vra",
+        "chara/03/14/0111/model/BSM_0314_0101_52.dxg -> chara/03/14/0111/attr/bsz_0314_0101_52.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_01.dxg -> chara/03/32/0105/attr/bsz_0332_0102_01.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_02.dxg -> chara/03/32/0105/attr/bsz_0332_0102_02.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_11.dxg -> chara/03/32/0105/attr/bsz_0332_0102_11.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_12.dxg -> chara/03/32/0105/attr/bsz_0332_0102_12.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_21.dxg -> chara/03/32/0105/attr/bsz_0332_0102_21.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_22.dxg -> chara/03/32/0105/attr/bsz_0332_0102_22.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_23.dxg -> chara/03/32/0105/attr/bsz_0332_0102_23.vra",
+        "chara/03/32/0105/model/BSM_0332_0102_24.dxg -> chara/03/32/0105/attr/bsz_0332_0102_24.vra",
+        "chara/03/32/0105/model/BSM_0332_0105_52.dxg -> chara/03/32/0105/attr/bsz_0332_0105_52.vra"
+      ],
+      "fx": [
+        "fx/01/model/PM_01_158_01.dxg -> fx/01/attr/pz_01_158_01.vra",
+        "fx/01/model/PM_01_179_02_.dxg -> fx/01/attr/pz_01_179_02_.vra",
+        "fx/01/model/PM_02_082_21.dxg -> fx/01/attr/pz_02_082_21.vra",
+        "fx/04/model/PZ_04_0106_01.dxg -> fx/04/attr/PZ_04_0106_01.vra"
+      ],
+      "world": [
+        "world/field/F07/model/FZM_F07_a1G.dxg -> world/field/F07/attr/FZM_F07_a1G.vra",
+        "world/field/F07/model/FZ_F07_a1G.dxg -> world/field/F07/attr/FZ_F07_a1G.vra",
+        "world/field/F08/model/FM_F08_Kundgrd02_ABB.dxg -> world/field/F08/attr/fz_F08_Kundgrd02_ABB.vra",
+        "world/field/F13/model/FM_F13_grd01_AC.dxg -> world/field/F13/attr/fz_F13_grd01_AC.vra",
+        "world/field/F15/model/FZ_F15_gratest.dxg -> world/field/F15/attr/FZ_F15_gratest.vra",
+        "world/field/F30/model/F30_00_hit.dxg -> world/field/F30/attr/F30_00_hit.vra",
+        "world/object/09/model/OE_09_as_4GTbill01E.dxg -> world/object/09/attr/OE_09_as_4GTbill01E.vra",
+        "world/object/09/model/OM_09_er_lampac01C.dxg -> world/object/09/attr/oz_09_er_lampac01C.vra",
+        "world/object/09/model/OM_09_wv_kari01A.dxg -> world/object/09/attr/oz_09_wv_kari01A.vra",
+        "world/object/10/model/OM_10_as_sea01RGF.dxg -> world/object/10/attr/oz_10_as_sea01RGF.vra",
+        "world/object/24/model/OM_24_er_KJAhway02.dxg -> world/object/24/attr/oz_24_er_KJAhway02.vra",
+        "world/object/24/model/OM_24_er_KJAhway02C.dxg -> world/object/24/attr/oz_24_er_KJAhway02C.vra"
+      ]
+    }
+  },
+  "dxg_mesh_material_bindings": {
+    "counts": {
+      "chara_dxg_mesh_names": 10714,
+      "chara_dxg_without_names": 5,
+      "chara_legacy_lod_name_but_vra_bound": 3,
+      "chara_matched_no_render": 22,
+      "chara_matched_with_material": 10632,
+      "chara_matched_without_material": 7,
+      "chara_mesh_name_matched": 10661,
+      "chara_mesh_name_unmatched": 53,
+      "chara_models": 1666,
+      "chara_s_base_absent": 346,
+      "chara_s_base_directory_id_filename_repair": 3,
+      "chara_s_base_exact": 10214,
+      "chara_s_base_identical_basename": 36,
+      "chara_s_base_normalized_filename": 1,
+      "chara_s_base_unique_basename": 1,
+      "chara_s_base_unresolved": 1,
+      "chara_s_base_vra_directory_key_filename_repair": 30,
+      "chara_s_mix_absent": 10562,
+      "chara_s_mix_exact": 70,
+      "chara_vra_without_mesh_binds": 19,
+      "chara_with_vra": 1653,
+      "chara_without_vra": 13,
+      "fx_dxg_mesh_names": 1006,
+      "fx_matched_with_material": 1006,
+      "fx_mesh_name_matched": 1006,
+      "fx_models": 785,
+      "fx_s_base_absent": 53,
+      "fx_s_base_exact": 945,
+      "fx_s_base_unique_basename": 4,
+      "fx_s_base_unique_stem_alt_format": 1,
+      "fx_s_base_unresolved": 3,
+      "fx_s_mix_absent": 1003,
+      "fx_s_mix_exact": 3,
+      "fx_with_vra": 781,
+      "fx_without_vra": 4,
+      "item_dxg_mesh_names": 3229,
+      "item_matched_no_render": 106,
+      "item_matched_with_material": 3112,
+      "item_matched_without_material": 1,
+      "item_mesh_name_matched": 3219,
+      "item_mesh_name_unmatched": 10,
+      "item_models": 2918,
+      "item_s_base_absent": 104,
+      "item_s_base_exact": 2980,
+      "item_s_base_item_sibling_texture_preview_fallback": 2,
+      "item_s_base_item_texture_prefix_repair": 4,
+      "item_s_base_item_variant_texture_repair": 2,
+      "item_s_base_normalized_filename": 1,
+      "item_s_base_unique_basename": 18,
+      "item_s_base_unresolved": 1,
+      "item_s_mix_absent": 3112,
+      "item_vra_without_mesh_binds": 5,
+      "item_with_vra": 2918,
+      "other_dxg_mesh_names": 1067,
+      "other_matched_with_material": 14,
+      "other_mesh_name_matched": 14,
+      "other_mesh_name_unmatched": 1053,
+      "other_models": 31,
+      "other_s_base_absent": 8,
+      "other_s_base_unique_stem_alt_format": 6,
+      "other_s_mix_absent": 14,
+      "other_vra_without_mesh_binds": 29,
+      "other_with_vra": 31,
+      "world_dxg_mesh_names": 95935,
+      "world_dxg_without_names": 26,
+      "world_matched_no_render": 7193,
+      "world_matched_with_material": 86829,
+      "world_matched_without_material": 15,
+      "world_mesh_name_matched": 94037,
+      "world_mesh_name_unmatched": 1898,
+      "world_models": 11731,
+      "world_s_base_absent": 2455,
+      "world_s_base_ambiguous_basename": 37,
+      "world_s_base_exact": 84121,
+      "world_s_base_identical_basename": 78,
+      "world_s_base_identical_stem_alt_format": 3,
+      "world_s_base_map_texture_preview_fallback": 65,
+      "world_s_base_same_directory_alt_format_repair": 1,
+      "world_s_base_unique_basename": 67,
+      "world_s_base_unique_stem_alt_format": 1,
+      "world_s_base_unresolved": 1,
+      "world_s_mix_absent": 80936,
+      "world_s_mix_exact": 5884,
+      "world_s_mix_map_texture_preview_fallback": 4,
+      "world_s_mix_normalized_filename": 1,
+      "world_s_mix_unique_basename": 4,
+      "world_vra_without_mesh_binds": 28,
+      "world_with_vra": 11706,
+      "world_without_vra": 25
+    },
+    "texture_problem_examples": {
+      "chara_s_base_unresolved": [
+        "chara/06/30/2001/model/bam_0630_2001_01.dxg :: |BAZ_0630_2001_01|BAZ_0630_2001_01 material 0 s_base=chara/06/30/2001/tex/OT_U12_mu_lift01.dds -> chara/06/30/2001/attr/BAZ_0630_2001_01.vra"
+      ],
+      "fx_s_base_unresolved": [
+        "fx/02/model/pm_02_001_73.dxg :: PM_02_001_73 material 0 s_base=fx/02/tex/PT_04_004_08.dds -> fx/02/attr/PZ_02_001_73.vra",
+        "fx/02/model/pm_02_002_42.dxg :: PM_02_002_42 material 0 s_base=fx/02/tex/ET_02_002_42.dds -> fx/02/attr/PZ_02_002_42.vra",
+        "fx/05/model/pm_05_600_03.dxg :: Camera_add1 material 0 s_base=fx/05/tex/PT_05_600_03.dds -> fx/05/attr/PZ_05_600_03.vra"
+      ],
+      "item_s_base_unresolved": [
+        "item/05/0108/model/em_05_0108_01.dxg :: EM_05_0108_01_SRSPGN material 0 s_base=item/05/0108/tex/ET_05_0108_01C.dds -> item/05/0108/attr/EZ_05_0108_01.vra"
+      ],
+      "world_s_base_ambiguous_basename": [
+        "world/field/f06/model/om_09_f06_to_dike01a.dxg :: OZ_09_F06_to_dike01A_02 material 2 s_base=world\\field\\F06\\tex\\OT_09_ys_plant03.dds -> world/field/F06/attr/OZ_09_F06_to_dike01A.vra",
+        "world/field/f06/model/om_09_f06_to_dike01a.dxg :: OZ_09_F06_to_dike01A_03 material 3 s_base=world\\field\\F06\\tex\\OT_09_ys_plant04.dds -> world/field/F06/attr/OZ_09_F06_to_dike01A.vra",
+        "world/field/f13/model/om_f13_fu_hangar01.dxg :: polySurface559_01 material 1 s_base=/world/field/F13/tex/FT_F17_ni_shed01.dds -> world/field/F13/attr/OZ_F13_fu_hangar01.vra",
+        "world/field/f13/model/om_f13_fu_hangar01.dxg :: polySurface554_01 material 1 s_base=/world/field/F13/tex/FT_F17_ni_shed01.dds -> world/field/F13/attr/OZ_F13_fu_hangar01.vra",
+        "world/field/f23/model/fm_f23_grd02_a.dxg :: polySurface6535045599_00 material 4 s_base=world/field/F23/tex/U12_mu_steel01.dds -> world/field/F23/attr/FZ_F23_grd02_A.vra",
+        "world/field/u17/model/fm_u17_grd01.dxg :: polySurface653468906_00 material 35 s_base=world/field/U17/tex/U12_mu_sb_gate01.dds -> world/field/U17/attr/FZ_U17_grd01.vra",
+        "world/field/u17/model/fm_u17_grd01.dxg :: polySurface653468906_01 material 36 s_base=world/field/U17/tex/U12_mu_sb_wall01.dds -> world/field/U17/attr/FZ_U17_grd01.vra",
+        "world/field/u17/model/fm_u17_grd01.dxg :: polySurface653468906_02 material 37 s_base=world/field/U17/tex/U12_mu_sb_wall02.dds -> world/field/U17/attr/FZ_U17_grd01.vra",
+        "world/field/u17/model/fm_u17_grd01.dxg :: F21_fu_sea_base_74:OZ_F21_fu_obj_09 material 39 s_base=world/field/U17/tex/F17_mu_traffic01.dds -> world/field/U17/attr/FZ_U17_grd01.vra",
+        "world/field/u17/model/fm_u17_grd01.dxg :: OZ_F21_fu_obj_09 material 39 s_base=world/field/U17/tex/F17_mu_traffic01.dds -> world/field/U17/attr/FZ_U17_grd01.vra"
+      ],
+      "world_s_base_unresolved": [
+        "world/field/u17/model/fm_u17_grd01.dxg :: pCube299 material 38 s_base=world/field/U17/tex/fu_ground07.dds -> world/field/U17/attr/FZ_U17_grd01.vra"
+      ]
+    },
+    "unmatched_mesh_examples": {
+      "chara_legacy_lod_name_but_vra_bound": [
+        "chara/01/01/0111/model/msm_0101_0111_01.dxg :: MSM_0101_0111_01_GND_01 -> material 2",
+        "chara/01/01/0111/model/msm_0101_0111_03.dxg :: MSM_0101_0111_03_GND_01 -> material 2",
+        "chara/01/01/0111/model/msm_0101_0111_11.dxg :: MSM_0101_0111_11_GND_01 -> material 1"
+      ],
+      "chara_mesh_name_unmatched": [
+        "chara/01/21/0161/model/msm_0121_0161_02.dxg :: BV_R_Thigh -> chara/01/21/0161/attr/MSZ_0121_0161_02.vra",
+        "chara/01/21/0161/model/msm_0121_0161_02.dxg :: MSM_0121_0111_02_ZKJ_00 -> chara/01/21/0161/attr/MSZ_0121_0161_02.vra",
+        "chara/01/21/0161/model/msm_0121_0161_02.dxg :: MSM_0121_0111_02_ZKJ_01 -> chara/01/21/0161/attr/MSZ_0121_0161_02.vra",
+        "chara/01/24/1202/model/msm_0124_1202_01.dxg :: Hand_01 -> chara/01/24/1202/attr/MSZ_0124_1202_01.vra",
+        "chara/01/24/1202/model/msm_0124_1202_01.dxg :: Hand_02 -> chara/01/24/1202/attr/MSZ_0124_1202_01.vra",
+        "chara/01/24/1202/model/msm_0124_1202_01.dxg :: Hand_04 -> chara/01/24/1202/attr/MSZ_0124_1202_01.vra",
+        "chara/01/24/1202/model/msm_0124_1202_01.dxg :: Hand_03 -> chara/01/24/1202/attr/MSZ_0124_1202_01.vra",
+        "chara/01/24/1202/model/msm_0124_1202_01.dxg :: sabel -> chara/01/24/1202/attr/MSZ_0124_1202_01.vra",
+        "chara/01/24/1202/model/msm_0124_1202_01.dxg :: MSM_0124_1202_02_GLMS -> chara/01/24/1202/attr/MSZ_0124_1202_01.vra",
+        "chara/03/06/0101/model/bsm_0306_0101_12.dxg :: BSM_0306_0101_12_G03_00 -> chara/03/06/0101/attr/BSZ_0306_0101_12.vra"
+      ],
+      "item_mesh_name_unmatched": [
+        "item/02/001500/model/em_02_001500_01.dxg :: _ -> item/02/001500/attr/EZ_02_001500_01.vra",
+        "item/02/001500/model/em_02_001500_01.dxg :: EM_02_001500_01_KEBRSTFRGND -> item/02/001500/attr/EZ_02_001500_01.vra",
+        "item/02/001500/model/em_02_001500_02.dxg :: _ -> item/02/001500/attr/EZ_02_001500_02.vra",
+        "item/02/001500/model/em_02_001500_02.dxg :: EM_02_001500_02_KEBRSTFRGND -> item/02/001500/attr/EZ_02_001500_02.vra",
+        "item/09/2403/model/em_09_2403_01.dxg :: _ -> item/09/2403/attr/EZ_09_2403_01.vra",
+        "item/09/2403/model/em_09_2403_01.dxg :: EM_09_2403_01_MP3 -> item/09/2403/attr/EZ_09_2403_01.vra",
+        "item/13/7103/model/em_13_7103_01.dxg :: _ -> item/13/7103/attr/EZ_13_7103_01.vra",
+        "item/13/7103/model/em_13_7103_01.dxg :: EM_13_7103_01_IFP -> item/13/7103/attr/EZ_13_7103_01.vra",
+        "item/13/7103/model/em_13_7103_02.dxg :: _ -> item/13/7103/attr/EZ_13_7103_02.vra",
+        "item/13/7103/model/em_13_7103_02.dxg :: EM_13_7103_02_IFH -> item/13/7103/attr/EZ_13_7103_02.vra"
+      ],
+      "other_mesh_name_unmatched": [
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: _ -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_RootPos -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam01 -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam01_Camera -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam01_Camera_Vib -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam01_Target -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam02 -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam02_Camera -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam02_Camera_Vib -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra",
+        "scene/common/01/lose/001/model/evm_c01_l001.dxg :: Ev_T_Cam02_Target -> scene/common/01/lose/001/attr/EVZ_C01_L001.vra"
+      ],
+      "world_mesh_name_unmatched": [
+        "world/field/f01/model/fm_asf01_insd01_a.dxg :: FZ_asF01_insd01_A_07 -> world/field/F01/attr/FZ_asF01_insd01_A.vra",
+        "world/field/f01/model/fm_asf01_insd01_a.dxg :: FZ_asF01_insd01_A_08 -> world/field/F01/attr/FZ_asF01_insd01_A.vra",
+        "world/field/f01/model/fm_asf01_insd01_a.dxg :: FZ_asF01_insd01_A_09 -> world/field/F01/attr/FZ_asF01_insd01_A.vra",
+        "world/field/f01/model/fm_asf01_insd01_b.dxg :: FZ_asF01_insd01_A_00 -> world/field/F01/attr/FZ_asF01_insd01_B.vra",
+        "world/field/f01/model/fm_asf01_insd01_b.dxg :: FZ_asF01_insd01_A_07 -> world/field/F01/attr/FZ_asF01_insd01_B.vra",
+        "world/field/f01/model/fm_asf01_insd01_b.dxg :: FZ_asF01_insd01_A_08 -> world/field/F01/attr/FZ_asF01_insd01_B.vra",
+        "world/field/f01/model/fm_asf01_insd01_b.dxg :: FZ_asF01_insd01_A_09 -> world/field/F01/attr/FZ_asF01_insd01_B.vra",
+        "world/field/f01/model/fm_f01_grd01_aaa.dxg :: hit_grd0 -> world/field/F01/attr/FZ_F01_grd01_AAA.vra",
+        "world/field/f01/model/fm_f01_grd01_aab.dxg :: hit_grd0 -> world/field/F01/attr/FZ_F01_grd01_AAB.vra",
+        "world/field/f01/model/fm_f01_grd01_aac.dxg :: hit_grd0 -> world/field/F01/attr/FZ_F01_grd01_AAC.vra"
+      ]
+    }
+  },
+  "fx_vra_and_pp_files": {
+    "all_fx_vra": {
+      "anim_type_0": 53211,
+      "anim_type_1": 1452,
+      "particle": 36139,
+      "sprite": 18524
+    },
+    "pp_files": {
+      "anim_type_0": 52148,
+      "anim_type_1": 1447,
+      "nodes_with_empty_file": 4,
+      "nodes_with_file": 53595,
+      "particle": 36049,
+      "pp_files": 6267,
+      "sprite": 17546,
+      "vra_files": 24448
+    }
+  },
+  "material_features": {
+    "nonzero_uvadd_fields": 1329,
+    "vra_files_with_nonzero_uvadd": 813
+  },
+  "root": "F:\\9ymsgo\\9you\\机动战士敢达Online\\GundamOnline\\unpackdat",
+  "texture_index": {
+    "image_files": 66589
+  },
+  "texture_path_examples": {
+    "pp_image": {
+      "ambiguous_basename": [],
+      "unresolved": [
+        "fx/image/NG_88_001_09.png",
+        "fx/image/PT_01_093_02.png",
+        "fx/image/PT_01_103_06.png",
+        "fx/image/PT_01_104_04.png",
+        "fx/image/PT_01_104_07.png",
+        "fx/image/PT_01_156_07.png",
+        "fx/image/PT_03_001_05.png",
+        "fx/image/PT_03_100_03.png",
+        "fx/image/PT_03_204_01.png",
+        "fx/image/PT_06_056_17.png",
+        "fx/image/PT_09_104_11.png",
+        "fx/image/PT_09_104_12.png",
+        "fx/image/PT_09_104_13.png",
+        "fx/image/PT_09_608_03.png",
+        "fx/image/PT_10_156_05.png",
+        "fx/image/大規模戦開始下敷き.png",
+        "fx/image/新出撃用ＢＧ03.png"
+      ]
+    },
+    "vra_s_base": {
+      "ambiguous_basename": [
+        "world/field/F06/tex/OT_09_ys_plant03.dds",
+        "world/field/F06/tex/OT_09_ys_plant04.dds",
+        "world/field/F06/tex/ot_09_ys_plant01.dds",
+        "world/field/F06/tex/ot_09_ys_plant02.dds",
+        "world/field/F07/tex/go_th_conwall_01.dds",
+        "world/field/F13/tex/FT_F17_ni_shed01.dds",
+        "world/field/F22/tex/OT_60_kn_air01.dds",
+        "world/field/F22/tex/UT_U19_tm_moon.dds",
+        "world/field/F23/tex/U12_mu_steel01.dds",
+        "world/field/U17/tex/F17_mu_traffic01.dds",
+        "world/field/U17/tex/U12_mu_sb_gate01.dds",
+        "world/field/U17/tex/U12_mu_sb_wall01.dds",
+        "world/field/U17/tex/U12_mu_sb_wall02.dds",
+        "world/field/U17/tex/U13_lee_koroni_03.dds",
+        "world/field/U17/tex/U13_ni_korony_03_break.dds",
+        "world/field/U18/tex/F17_mu_box02.dds",
+        "world/field/U18/tex/F17_mu_loof01.dds",
+        "world/field/U18/tex/F17_mu_loof02.dds",
+        "world/field/U18/tex/FT_F17_ni_shed01.dds",
+        "world/object/09/tex/F01_ka_ground_010.dds",
+        "world/object/09/tex/F01_ka_wall_004.dds",
+        "world/object/22/tex/F01_ka_ground_010.dds",
+        "world/object/22/tex/F01_ka_wall_004.dds",
+        "world/object/22/tex/FT_F04_ht_wall04.dds",
+        "world/object/22/tex/FT_F04_ht_wall07.dds",
+        "world/object/22/tex/FT_F04_ht_wall08.dds",
+        "world/object/22/tex/FT_F12_ht_wall09.dds",
+        "world/object/22/tex/FT_F12_ht_wall10.dds",
+        "world/object/22/tex/FT_F15_kn_musdraiber01.dds",
+        "world/object/60/tex/OZ_10_as_sea.dds"
+      ],
+      "unresolved": [
+        "chara/06/30/2001/tex/OT_U12_mu_lift01.dds",
+        "fx/02/tex/ET_02_002_42.dds",
+        "fx/02/tex/PT_04_004_08.dds",
+        "fx/05/tex/PT_05_600_03.dds",
+        "item/05/0108/tex/ET_05_0108_01C.dds",
+        "world/field/F08/tex/FZ_F08_k2_glass_A.dds",
+        "world/field/U17/tex/fu_ground07.dds"
+      ]
+    },
+    "vra_s_gloss": {
+      "ambiguous_basename": [],
+      "unresolved": []
+    },
+    "vra_s_mix": {
+      "ambiguous_basename": [],
+      "unresolved": []
+    }
+  },
+  "texture_references": {
+    "pp_image": {
+      "references": {
+        "exact": 53018,
+        "fx_image_prefix_repair": 17,
+        "normalized_filename": 5,
+        "trimmed_path": 404,
+        "unique_basename": 11,
+        "unresolved": 136
+      },
+      "unique_paths": {
+        "exact": 1963,
+        "fx_image_prefix_repair": 1,
+        "normalized_filename": 2,
+        "trimmed_path": 10,
+        "unique_basename": 4,
+        "unresolved": 17
+      }
+    },
+    "vra_s_base": {
+      "references": {
+        "ambiguous_basename": 50,
+        "directory_id_filename_repair": 5,
+        "exact": 67024,
+        "identical_basename": 48,
+        "identical_stem_alt_format": 1,
+        "item_geometry_texture_fallback": 7,
+        "item_sibling_texture_preview_fallback": 2,
+        "item_texture_prefix_repair": 4,
+        "item_variant_texture_repair": 2,
+        "map_texture_preview_fallback": 91,
+        "normalized_filename": 2,
+        "same_directory_alt_format_repair": 1,
+        "unique_basename": 37,
+        "unique_stem_alt_format": 3,
+        "unresolved": 11,
+        "vra_directory_key_filename_repair": 90,
+        "vra_map_texture_name_repair": 165
+      },
+      "unique_paths": {
+        "ambiguous_basename": 30,
+        "directory_id_filename_repair": 4,
+        "exact": 9659,
+        "identical_basename": 31,
+        "identical_stem_alt_format": 1,
+        "item_geometry_texture_fallback": 7,
+        "item_sibling_texture_preview_fallback": 1,
+        "item_texture_prefix_repair": 3,
+        "item_variant_texture_repair": 1,
+        "map_texture_preview_fallback": 24,
+        "normalized_filename": 2,
+        "same_directory_alt_format_repair": 1,
+        "unique_basename": 27,
+        "unique_stem_alt_format": 3,
+        "unresolved": 7,
+        "vra_directory_key_filename_repair": 7,
+        "vra_map_texture_name_repair": 4
+      }
+    },
+    "vra_s_gloss": {
+      "references": {},
+      "unique_paths": {}
+    },
+    "vra_s_mix": {
+      "references": {
+        "exact": 6060,
+        "map_texture_preview_fallback": 8,
+        "normalized_filename": 1,
+        "unique_basename": 8
+      },
+      "unique_paths": {
+        "exact": 281,
+        "map_texture_preview_fallback": 4,
+        "normalized_filename": 1,
+        "unique_basename": 2
+      }
+    }
+  }
+}

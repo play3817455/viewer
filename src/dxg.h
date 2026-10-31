@@ -24,12 +24,10 @@ struct DxgMesh {
     std::vector<DxgVec3> pos;
     std::vector<DxgVec3> nrm;
     std::vector<DxgVec2> uv;
+    std::vector<DxgVec2> uv1;
     std::vector<uint32_t> idx;
 
-    // Skinning (confirmed in sub_B71290): every shape carries its own bone name
-    // table (shape+4 = count, <= 26) and a u16 bone index per vertex that points
-    // into it. The game does not use smooth weights - each vertex follows exactly
-    // one bone.
+    // Per-shape rigid bone palette and per-vertex palette slot decoded from DXG.
     std::vector<std::string> boneNames;   // shape bone palette
     std::vector<uint16_t> vertBone;       // per vertex index into boneNames
 };

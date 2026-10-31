@@ -100,6 +100,10 @@ static std::vector<VfsNode> g_vfs;
 static std::vector<unsigned> g_vfsMatch;
 static std::map<std::wstring, std::vector<std::pair<int, int>>> g_unitIndex;
 static std::map<std::wstring, std::pair<int, int>> g_pathIndex;
+// Keep every resource that occupies the same virtual path. The tree disambiguates
+// duplicate archive entries for display, but preview dependencies must be resolved
+// against the archive that supplied the selected model when possible.
+static std::map<std::wstring, std::vector<std::pair<int, int>>> g_pathCandidates;
 // (arch, idx) → 小写 VFS 路径。构建索引时顺手存，过滤阶段只查它 —— 见 MatchesFilter。
 static std::map<std::pair<int, int>, std::wstring> g_filePathLower;
 
@@ -196,10 +200,15 @@ static std::atomic<bool> g_exporting{false};
 
 static std::wstring Widen(const std::string& s) {
     if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring w(n - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
-    return w;
+    const UINT codePages[] = {CP_UTF8, 932, CP_ACP};
+    for (UINT codePage : codePages) {
+        const DWORD flags = codePage == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0;
+        const int n = MultiByteToWideChar(codePage, flags, s.data(), (int)s.size(), nullptr, 0);
+        if (n <= 0) continue;
+        std::wstring w((size_t)n, L'\0');
+        if (MultiByteToWideChar(codePage, flags, s.data(), (int)s.size(), w.data(), n) == n) return w;
+    }
+    return {};
 }
 
 static std::string Narrow(const std::wstring& w) {
@@ -1226,22 +1235,395 @@ static bool Wants3DPreview(const std::wstring& path) {
     return ext == L".dxg" || ext == L".txg" || ext == L".vra" || ext == L".mrb";
 }
 
-static std::pair<int, int> FindByVfsPath(std::wstring needle) {
+static std::pair<int, int> FindByVfsPath(std::wstring needle, int preferArchive = -1) {
     needle = ToLower(NormVfs(needle));
     if (needle.empty()) return {-1, -1};
+    auto choosePreferred = [&](const std::vector<std::pair<int, int>>& refs) {
+        if (preferArchive >= 0) {
+            for (const auto& ref : refs)
+                if (ref.first == preferArchive) return ref;
+        }
+        return refs.empty() ? std::pair<int, int>{-1, -1} : refs.front();
+    };
+    auto candidates = g_pathCandidates.find(needle);
+    if (candidates != g_pathCandidates.end()) return choosePreferred(candidates->second);
     auto it = g_pathIndex.find(needle);
     if (it != g_pathIndex.end()) return it->second;
-    for (const auto& kv : g_pathIndex) {
+    std::pair<int, int> candidate{-1, -1};
+    for (const auto& kv : g_pathCandidates) {
         if (kv.first.size() >= needle.size() &&
-            kv.first.compare(kv.first.size() - needle.size(), needle.size(), needle) == 0)
-            return kv.second;
+            kv.first.compare(kv.first.size() - needle.size(), needle.size(), needle) == 0) {
+            const auto selected = choosePreferred(kv.second);
+            if (candidate.first >= 0 && candidate != selected) return {-1, -1};
+            candidate = selected;
+        }
     }
-    const std::wstring fn = FileNameOf(needle);
-    if (!fn.empty()) {
-        for (const auto& kv : g_pathIndex)
-            if (FileNameOf(kv.first) == fn) return kv.second;
+    return candidate;
+}
+
+static std::pair<int, int> FindTextureByVfsPath(const std::wstring& needle,
+                                                 std::wstring& resolution,
+                                                 int preferArchive = -1,
+                                                 const std::wstring& geometryContext = L"") {
+    resolution.clear();
+    auto exactOrSuffix = FindByVfsPath(needle, preferArchive);
+    if (exactOrSuffix.first >= 0) return exactOrSuffix;
+
+    std::wstring trimmed = NormVfs(needle);
+    std::wstring cleanSegments;
+    size_t segment = 0;
+    auto isPathSpace = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == 0x3000; };
+    while (segment <= trimmed.size()) {
+        const size_t sep = trimmed.find(L'/', segment);
+        const size_t end = sep == std::wstring::npos ? trimmed.size() : sep;
+        size_t first = segment, last = end;
+        while (first < last && isPathSpace(trimmed[first])) ++first;
+        while (last > first && isPathSpace(trimmed[last - 1])) --last;
+        cleanSegments.append(trimmed, first, last - first);
+        if (sep == std::wstring::npos) break;
+        cleanSegments.push_back(L'/');
+        segment = sep + 1;
     }
-    return {-1, -1};
+    trimmed = std::move(cleanSegments);
+    auto trimmedMatch = FindByVfsPath(trimmed, preferArchive);
+    if (trimmedMatch.first >= 0) {
+        resolution = L"路径全角/边界空格修正";
+        return trimmedMatch;
+    }
+
+    // Official FX data contains two deterministic filename typos. Probe the
+    // corrected file beside the reference first; FindByVfsPath rejects
+    // ambiguous suffixes and still prefers the VRA's archive when possible.
+    const std::wstring filename = FileNameOf(trimmed);
+    std::vector<std::wstring> aliases;
+    std::wstring collapsed;
+    for (wchar_t ch : filename) {
+        if (ch == L'.' && !collapsed.empty() && collapsed.back() == L'.') continue;
+        collapsed.push_back(ch);
+    }
+    if (collapsed != filename) aliases.push_back(collapsed);
+    const std::wstring lowerFilename = ToLower(filename);
+    for (const wchar_t* ext : {L".dds", L".png", L".tga"}) {
+        const size_t at = lowerFilename.find(ext);
+        if (at != std::wstring::npos && at + wcslen(ext) < filename.size()) {
+            aliases.push_back(filename.substr(0, at + wcslen(ext)));
+            break;
+        }
+    }
+    const size_t extAt = filename.find_last_of(L'.');
+    const size_t digitAt = extAt == std::wstring::npos ? filename.size() : extAt;
+    if (digitAt >= 2 && filename[digitAt - 1] >= L'0' && filename[digitAt - 1] <= L'9' &&
+        filename[digitAt - 2] == L'_' &&
+        (digitAt < 3 || filename[digitAt - 3] < L'0' || filename[digitAt - 3] > L'9')) {
+        std::wstring padded = filename;
+        padded.insert(digitAt - 1, 1, L'0');
+        aliases.push_back(std::move(padded));
+    }
+    if (extAt != std::wstring::npos) {
+        size_t trimmedEnd = extAt;
+        while (trimmedEnd > 0 && (filename[trimmedEnd - 1] == L' ' || filename[trimmedEnd - 1] == L'\t' ||
+                                  filename[trimmedEnd - 1] == L'\r' || filename[trimmedEnd - 1] == L'\n' ||
+                                  filename[trimmedEnd - 1] == 0x3000)) --trimmedEnd;
+        if (trimmedEnd != extAt)
+            aliases.push_back(filename.substr(0, trimmedEnd) + filename.substr(extAt));
+        for (const wchar_t* ext : {L".dds", L".png", L".tga"})
+            if (ToLower(filename.substr(extAt)) != ext)
+                aliases.push_back(filename.substr(0, extAt) + ext);
+    }
+    const std::wstring directoryId = std::filesystem::path(trimmed).parent_path().parent_path().filename().wstring();
+    if (directoryId.size() == 4 && std::all_of(directoryId.begin(), directoryId.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; })) {
+        for (size_t at = 0; at + 4 <= filename.size(); ++at) {
+            if (filename.compare(at, 4, directoryId) == 0) continue;
+            if (!std::all_of(filename.begin() + at, filename.begin() + at + 4,
+                             [](wchar_t c) { return c >= L'0' && c <= L'9'; })) continue;
+            std::wstring corrected = filename;
+            corrected.replace(at, 4, directoryId);
+            aliases.push_back(std::move(corrected));
+        }
+    }
+    // Several official chara VRA files use a compact legacy BST texture name
+    // (for example BST_03_3101_01C.dds) while the image stored beside that VRA
+    // is keyed by the resource directory (BST_0331_0101_01C.dds). Recover this
+    // only when category/unit/variant IDs in the path exactly explain the
+    // legacy tokens, and let the same-directory exact lookup prove uniqueness.
+    const std::filesystem::path relativePath(trimmed);
+    const std::wstring category = relativePath.parent_path().parent_path().parent_path().parent_path().filename().wstring();
+    const std::wstring unit = relativePath.parent_path().parent_path().parent_path().filename().wstring();
+    const std::wstring variant = relativePath.parent_path().parent_path().filename().wstring();
+    const std::wstring bstPrefix = L"BST_" + category + L"_";
+    if (relativePath.begin() != relativePath.end() &&
+        ToLower((*relativePath.begin()).wstring()) == L"chara" &&
+        category.size() == 2 && unit.size() == 2 && variant.size() == 4 &&
+        std::all_of(category.begin(), category.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }) &&
+        std::all_of(unit.begin(), unit.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }) &&
+        std::all_of(variant.begin(), variant.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }) &&
+        ToLower(filename).rfind(ToLower(bstPrefix), 0) == 0 &&
+        filename.size() > bstPrefix.size() + 5 &&
+        filename[bstPrefix.size() + 4] == L'_' &&
+        std::all_of(filename.begin() + bstPrefix.size(), filename.begin() + bstPrefix.size() + 4,
+                    [](wchar_t c) { return c >= L'0' && c <= L'9'; })) {
+        const std::wstring legacyId = filename.substr(bstPrefix.size(), 4);
+        if (legacyId.substr(0, 2) == unit && legacyId.substr(2, 2) == variant.substr(2, 2)) {
+            const std::wstring canonical = L"BST_" + category + unit + L"_" + variant + filename.substr(bstPrefix.size() + 4);
+            aliases.push_back(canonical);
+        }
+        // Some older VRA rows retain a texture key from another unit, while
+        // the only exact-suffix BST sibling is keyed by this VRA directory.
+        // The canonical candidate still has to exist beside this reference.
+        aliases.push_back(L"BST_" + category + unit + L"_" + variant + filename.substr(bstPrefix.size() + 4));
+    }
+    const std::wstring assetRootKind = relativePath.begin() != relativePath.end() ? ToLower((*relativePath.begin()).wstring()) : L"";
+    std::wstring mapTextureAlias;
+    std::wstring mapTextureFallbackAlias;
+    std::wstring mapTextureFallbackPath;
+    std::wstring mapTextureFallbackResolution = L"跨目录地图近似贴图回退";
+    const std::wstring textureFolder = ToLower(relativePath.parent_path().generic_wstring());
+    if (textureFolder == L"world/field/f14/tex") {
+        if (lowerFilename == L"ft_09_kn_light01.dds") mapTextureAlias = L"FT_F14_kn_light01.dds";
+        else if (lowerFilename == L"ft_f14_kn_mix_ice01_guid.dds") mapTextureAlias = L"FT_F14_kn_mix_ice01.dds";
+    } else if (textureFolder == L"world/field/u02/tex" && lowerFilename == L"ot_09_se_colony04.dds") {
+        mapTextureAlias = L"UT_U02_se_colony04.dds";
+    } else if (textureFolder == L"world/field/u09/tex" && lowerFilename == L"ut_u09_wt_dross01.dds") {
+        mapTextureAlias = L"UT_U09_nk_dross01.dds";
+    } else if (textureFolder == L"world/field/f16/tex") {
+        if (lowerFilename == L"fz_f16_as_roada.dds") mapTextureFallbackAlias = L"f16_ha_gr_B.dds";
+        else if (lowerFilename == L"fz_f16_as_grassa.dds") mapTextureFallbackAlias = L"f16_ha_gr_A.dds";
+        else if (lowerFilename == L"fz_f16_as_grassb.dds") mapTextureFallbackAlias = L"f16_ha_gr_mask_A.dds";
+        else if (lowerFilename == L"fz_f16_as_cliffb.dds") mapTextureFallbackAlias = L"f16_ha_wall_A.dds";
+        else if (lowerFilename == L"fz_f16_as_tutia.dds") mapTextureFallbackAlias = L"f16_ha_underwarter_A.dds";
+    } else if (textureFolder == L"world/field/u17/tex" && lowerFilename == L"fu_grdline01.dds") {
+        mapTextureFallbackAlias = L"fu_line01.dds";
+    } else if ((textureFolder == L"world/field/u17/tex" || textureFolder == L"world/object/u17/tex") && lowerFilename == L"ut_u17_to_wall01.psd") {
+        mapTextureFallbackAlias = L"UT_U17_wall01.dds";
+    } else if (textureFolder == L"world/object/09/tex" && lowerFilename.rfind(L"ot_09_ys_", 0) == 0) {
+        mapTextureFallbackPath = L"world/object/60/tex/OT_60_ys_" + filename.substr(9);
+    } else if (textureFolder == L"world/object/09/tex") {
+        if (lowerFilename == L"ot_09_ko_castlemount01a.dds") mapTextureFallbackAlias = L"OT_F06_to_castle001.dds";
+        else if (lowerFilename == L"ot_09_ko_road01a.dds") mapTextureFallbackAlias = L"OZ_09_as_9GXroad01A.dds";
+        else if (lowerFilename == L"oz_09_framea.dds") mapTextureFallbackAlias = L"OT_09_kn_frame01.dds";
+        else if (lowerFilename == L"ot_09_ns_tabuild04.dds") mapTextureFallbackAlias = L"OT_09_ns_tabuild03.dds";
+    } else if (textureFolder == L"world/field/u24/tex") {
+        if (lowerFilename == L"t_cliff_high_01_b.tga") mapTextureFallbackAlias = L"U24_ka_rock_a.dds";
+        else if (lowerFilename == L"t_cliff_high_02_b.tga") mapTextureFallbackAlias = L"U24_ka_rock_b.dds";
+    } else if (textureFolder == L"world/object/22/tex" && lowerFilename == L"ut_u09_wt_dross01.dds") {
+        mapTextureFallbackPath = L"world/field/U09/tex/UT_U09_nk_dross01.dds";
+    } else if (textureFolder == L"world/object/22/tex" && lowerFilename == L"ot_22_er_conta01.dds") {
+        mapTextureFallbackPath = L"world/object/08/tex/OT_08_er_conta01.dds";
+    } else if (textureFolder == L"world/object/22/tex" && lowerFilename == L"ft_f04_ht_wall_shadow.dds") {
+        mapTextureFallbackPath = L"world/object/F12/tex/FT_F04_ht_wall_shadow.dds";
+    } else if (textureFolder == L"world/object/22/tex" && lowerFilename == L"ft_f04_ht_wall06_ca.dds") {
+        mapTextureFallbackPath = L"world/object/F12/tex/FT_F04_ht_wall06_ca.dds";
+    } else if (textureFolder == L"world/object/22/tex" && lowerFilename == L"ft_f12_th_grd_d02.dds") {
+        mapTextureFallbackPath = L"world/object/F12/tex/FT_F12_th_grd_d02.dds";
+    }
+    if (!mapTextureAlias.empty()) aliases.push_back(mapTextureAlias);
+    if (!mapTextureFallbackAlias.empty()) aliases.push_back(mapTextureFallbackAlias);
+    if (assetRootKind == L"item") {
+        const std::wstring itemCategory = relativePath.parent_path().parent_path().parent_path().filename().wstring();
+        const std::wstring itemId = relativePath.parent_path().parent_path().filename().wstring();
+        std::wstring cleanName = filename;
+        const size_t cleanExt = cleanName.find_last_of(L'.');
+        if (cleanExt != std::wstring::npos) {
+            size_t cleanEnd = cleanExt;
+            while (cleanEnd > 0 && (cleanName[cleanEnd - 1] == L' ' || cleanName[cleanEnd - 1] == L'\t' ||
+                                    cleanName[cleanEnd - 1] == L'\r' || cleanName[cleanEnd - 1] == L'\n' ||
+                                    cleanName[cleanEnd - 1] == 0x3000)) --cleanEnd;
+            cleanName = cleanName.substr(0, cleanEnd) + cleanName.substr(cleanExt);
+        }
+        const std::wstring expectedPrefix = L"EM_" + itemCategory + L"_" + itemId + L"_";
+        if (itemCategory.size() == 2 && itemId.size() == 4 && ToLower(cleanName).rfind(ToLower(expectedPrefix), 0) == 0)
+            aliases.push_back(L"ET_" + cleanName.substr(3));
+        const std::wstring reversePrefix = L"ET_" + itemCategory + L"_" + itemId + L"_";
+        if (itemCategory.size() == 2 && itemId.size() == 4 && ToLower(cleanName).rfind(ToLower(reversePrefix), 0) == 0)
+            aliases.push_back(L"EM_" + cleanName.substr(3));
+    }
+    std::wstring itemVariantAlias;
+    std::wstring itemGeometryTextureAlias;
+    if (assetRootKind == L"item" && !geometryContext.empty()) {
+        const std::filesystem::path geometryPath(NormVfs(geometryContext));
+        const std::wstring itemCategory = geometryPath.parent_path().parent_path().parent_path().filename().wstring();
+        const std::wstring itemId = geometryPath.parent_path().parent_path().filename().wstring();
+        const std::wstring expectedStem = L"EM_" + itemCategory + L"_" + itemId + L"_";
+        const std::wstring modelStem = geometryPath.stem().wstring();
+        const std::filesystem::path expectedTextureDir = geometryPath.parent_path().parent_path() / L"tex";
+        const std::filesystem::path actualTextureDir = std::filesystem::path(trimmed).parent_path();
+        if (ToLower((*geometryPath.begin()).wstring()) == L"item" &&
+            itemCategory.size() == 2 && itemId.size() == 4 &&
+            ToLower(modelStem).rfind(ToLower(expectedStem), 0) == 0 &&
+            expectedTextureDir == actualTextureDir) {
+            const std::wstring variant = modelStem.substr(expectedStem.size());
+            if (itemCategory == L"04" && itemId == L"8417" && ToLower(filename) == L"saber_brade.tga" &&
+                (variant == L"01" || variant == L"02")) {
+                mapTextureFallbackPath = L"item/04/8413/tex/ET_04_8413_" + variant + L"C.dds";
+                mapTextureFallbackResolution = L"兄弟 item 同材质贴图近似回退";
+            }
+            if (ToLower(filename) == L"saber_brade.tga" && !variant.empty() && variant.size() <= 2 &&
+                std::all_of(variant.begin(), variant.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; })) {
+                itemVariantAlias = L"ET_" + itemCategory + L"_" + itemId + L"_" + variant + L"C.dds";
+                aliases.push_back(itemVariantAlias);
+            }
+            const std::wstring lowerFilename = ToLower(filename);
+            const std::wstring missingPrefix = L"et_12_0107_";
+            if (itemCategory == L"12" && itemId == L"0107" &&
+                lowerFilename.rfind(missingPrefix, 0) == 0 && lowerFilename.size() == missingPrefix.size() + 7 &&
+                lowerFilename.substr(lowerFilename.size() - 5) == L"c.dds") {
+                const std::wstring requestedVariant = filename.substr(missingPrefix.size(), 2);
+                if (requestedVariant >= L"04" && requestedVariant <= L"10" &&
+                    (variant == L"01" || variant == L"02")) {
+                    itemGeometryTextureAlias = L"ET_12_0107_" + variant + L"C.dds";
+                    aliases.push_back(itemGeometryTextureAlias);
+                }
+            }
+        }
+    }
+    const std::wstring parent = std::filesystem::path(trimmed).parent_path().generic_wstring();
+    std::wstring fxImageAlias;
+    if (ToLower(parent) == L"fx/image" && lowerFilename == L"mt_05_208_02.png") {
+        fxImageAlias = L"PT_05_208_02.png";
+        aliases.push_back(fxImageAlias);
+    }
+    for (const auto& alias : aliases) {
+        std::wstring candidate = parent.empty() ? alias : parent + L"/" + alias;
+        auto ref = FindByVfsPath(candidate, preferArchive);
+        if (ref.first >= 0) {
+            if (exactOrSuffix.first >= 0 && exactOrSuffix != ref) { resolution.clear(); return {-1, -1}; }
+            resolution = !itemGeometryTextureAlias.empty() && alias == itemGeometryTextureAlias
+                ? L"item 基础几何贴图回退" :
+                (!itemVariantAlias.empty() && alias == itemVariantAlias
+                    ? L"item 型号对应贴图修正" :
+                    (!mapTextureAlias.empty() && alias == mapTextureAlias
+                        ? L"VRA 地图贴图名修正" :
+                        (!mapTextureFallbackAlias.empty() && alias == mapTextureFallbackAlias
+                            ? L"地图近似贴图回退" :
+                            (!fxImageAlias.empty() && alias == fxImageAlias
+                                ? L"FX 图片前缀修正" : L"唯一目录内规范文件名"))));
+            exactOrSuffix = ref;
+        }
+    }
+    if (exactOrSuffix.first >= 0) return exactOrSuffix;
+    if (!mapTextureFallbackPath.empty()) {
+        auto fallback = FindByVfsPath(mapTextureFallbackPath, preferArchive);
+        if (fallback.first >= 0) {
+            resolution = mapTextureFallbackResolution;
+            return fallback;
+        }
+    }
+
+    const std::wstring normalized = ToLower(NormVfs(needle));
+    const std::wstring base = ToLower(FileNameOf(normalized));
+    const std::wstring ext = FileExt(normalized);
+    if (base.empty() || ext.empty()) return {-1, -1};
+
+    std::vector<std::pair<int, int>> candidates;
+    for (const auto& entry : g_pathCandidates) {
+        if (FileExt(entry.first) != ext || ToLower(FileNameOf(entry.first)) != base)
+            continue;
+        for (const auto& ref : entry.second)
+            if (std::find(candidates.begin(), candidates.end(), ref) == candidates.end())
+                candidates.push_back(ref);
+    }
+    if (candidates.empty()) {
+        // Some formal VRA files retain a source-machine .tga path while the
+        // unpacked client package contains only the converted .dds (or vice
+        // versa). Cross-format recovery is safe only for one unique stem or
+        // duplicate entries with byte-identical contents.
+        const size_t dot = base.find_last_of(L'.');
+        const std::wstring stem = dot == std::wstring::npos ? base : base.substr(0, dot);
+        std::vector<std::pair<int, int>> alternateFormats;
+        for (const auto& entry : g_pathCandidates) {
+            const std::wstring filename = ToLower(FileNameOf(entry.first));
+            const size_t otherDot = filename.find_last_of(L'.');
+            if (otherDot == std::wstring::npos || filename.substr(0, otherDot) != stem) continue;
+            const std::wstring otherExt = filename.substr(otherDot);
+            if (otherExt != L".dds" && otherExt != L".png" && otherExt != L".tga") continue;
+            for (const auto& ref : entry.second)
+                if (std::find(alternateFormats.begin(), alternateFormats.end(), ref) == alternateFormats.end())
+                    alternateFormats.push_back(ref);
+        }
+        if (alternateFormats.empty()) return {-1, -1};
+        std::vector<uint8_t> canonical;
+        std::pair<int, int> selected{-1, -1};
+        for (const auto& candidate : alternateFormats) {
+            if (candidate.first < 0 || candidate.first >= (int)g_cat.archives.size()) return {-1, -1};
+            const auto& archive = g_cat.archives[(size_t)candidate.first];
+            if (candidate.second < 0 || candidate.second >= (int)archive.files.size()) return {-1, -1};
+            std::vector<uint8_t> bytes;
+            try { bytes = fpmf::ExtractFile(archive, archive.files[(size_t)candidate.second], &g_cat); }
+            catch (...) { return {-1, -1}; }
+            if (bytes.empty()) return {-1, -1};
+            if (selected.first < 0) {
+                selected = candidate;
+                canonical = std::move(bytes);
+            } else if (bytes != canonical) {
+                return {-1, -1};
+            }
+        }
+        if (selected.first >= 0) resolution = L"唯一同名跨格式纹理";
+        return selected;
+    }
+
+    // A basename is safe only when every resource with that name has identical
+    // contents. This recovers bad path prefixes in formal VRA files without
+    // silently choosing between different textures that happen to share a name.
+    std::vector<uint8_t> canonical;
+    std::pair<int, int> selected{-1, -1};
+    uint32_t canonicalSize = 0;
+    for (const auto& candidate : candidates) {
+        if (candidate.first < 0 || candidate.first >= (int)g_cat.archives.size())
+            return {-1, -1};
+        const auto& archive = g_cat.archives[(size_t)candidate.first];
+        if (candidate.second < 0 || candidate.second >= (int)archive.files.size())
+            return {-1, -1};
+        const auto& file = archive.files[(size_t)candidate.second];
+        if (selected.first >= 0 && file.size != canonicalSize) return {-1, -1};
+        std::vector<uint8_t> bytes;
+        try {
+            bytes = fpmf::ExtractFile(archive, file, &g_cat);
+        } catch (...) {
+            return {-1, -1};
+        }
+        if (bytes.empty()) return {-1, -1};
+        if (selected.first < 0) {
+            selected = candidate;
+            canonicalSize = file.size;
+            canonical = std::move(bytes);
+        } else if (bytes != canonical) {
+            return {-1, -1};
+        }
+    }
+    if (selected.first >= 0) resolution = L"同名唯一或内容一致";
+    return selected;
+}
+
+static std::pair<int, int> FindAttrByGeometry(const std::wstring& modelPath,
+                                              std::pair<int, int> modelRef,
+                                              int preferArchive) {
+    const auto attrDir = NormVfs((std::filesystem::path(modelPath).parent_path().parent_path() /
+                                  L"attr").generic_wstring());
+    const std::wstring prefix = ToLower(attrDir + L"/");
+    auto it = g_pathCandidates.lower_bound(prefix);
+    std::pair<int, int> match{-1, -1};
+    for (; it != g_pathCandidates.end() && it->first.rfind(prefix, 0) == 0; ++it) {
+        if (FileExt(it->first) != L".vra") continue;
+        auto attrRef = it->second.front();
+        if (preferArchive >= 0) {
+            for (const auto& ref : it->second)
+                if (ref.first == preferArchive) { attrRef = ref; break; }
+        }
+        try {
+            const auto& ar = g_cat.archives[(size_t)attrRef.first];
+            const auto& file = ar.files[(size_t)attrRef.second];
+            const auto bytes = fpmf::ExtractFile(ar, file, &g_cat);
+            VraDoc attr;
+            if (bytes.empty() || !attr.Parse((const char*)bytes.data(), bytes.size()) || attr.geometry.empty()) continue;
+            const auto geometryRef = FindByVfsPath(Widen(attr.geometry), attrRef.first);
+            if (geometryRef != modelRef) continue;
+            if (match.first >= 0 && match != attrRef) return {-1, -1};
+            match = attrRef;
+        } catch (...) {
+        }
+    }
+    return match;
 }
 
 static std::wstring StemOf(const std::wstring& path) {
@@ -1251,12 +1633,35 @@ static std::wstring StemOf(const std::wstring& path) {
     return fn;
 }
 
+static std::wstring ModelStemFromAttr(const std::wstring& stem) {
+    const std::wstring prefix = ToLower(stem.substr(0, (std::min)(size_t(4), stem.size())));
+    std::wstring model = stem;
+    if (prefix == L"_ez_") model.replace(1, 2, L"EM");
+    else if (prefix == L"msz_") model.replace(0, 3, L"MSM");
+    else if (prefix == L"bsz_") model.replace(0, 3, L"BSM");
+    else if (prefix == L"baz_") model.replace(0, 3, L"BAM");
+    else if (prefix.rfind(L"ez_", 0) == 0) model.replace(0, 2, L"EM");
+    else if (prefix == L"maz_") model.replace(0, 3, L"MAM");
+    else if (prefix.rfind(L"pz_", 0) == 0) model.replace(0, 2, L"PM");
+    else if (prefix == L"plz_") model.replace(0, 3, L"PLM");
+    else if (prefix.rfind(L"uz_", 0) == 0) model.replace(0, 2, L"UM");
+    else if (prefix.rfind(L"oz_", 0) == 0) model.replace(0, 2, L"OM");
+    else if (prefix.rfind(L"fz_", 0) == 0) model.replace(0, 2, L"FM");
+    else if (prefix.rfind(L"sz_", 0) == 0) model.replace(0, 2, L"SM");
+    else if (prefix == L"opz_") model.replace(0, 3, L"OPM");
+    else if (prefix == L"evz_") model.replace(0, 3, L"EVM");
+    else if (prefix.rfind(L"dz_", 0) == 0) model.replace(0, 2, L"DM");
+    else return {};
+    return model;
+}
+
 static std::pair<int, int> FindUnitByExt(const std::wstring& unit, const wchar_t* ext,
                                          const std::wstring& preferStem) {
     auto it = g_unitIndex.find(unit);
     if (it == g_unitIndex.end()) return {-1, -1};
     std::pair<int, int> best{-1, -1};
     int bestScore = -1;
+    bool tiedBest = false;
     const std::wstring wantExt = ToLower(ext);
     for (auto pr : it->second) {
         if (pr.first < 0 || pr.first >= (int)g_cat.archives.size()) continue;
@@ -1265,6 +1670,7 @@ static std::pair<int, int> FindUnitByExt(const std::wstring& unit, const wchar_t
         const auto path = VfsPathOf(ar, ar.files[pr.second]);
         if (FileExt(path) != wantExt) continue;
         const std::wstring fn = ToLower(FileNameOf(path));
+        if (!preferStem.empty() && ToLower(StemOf(path)) != ToLower(preferStem)) continue;
         int s = 10;
         if (!preferStem.empty() && ToLower(StemOf(path)) == ToLower(preferStem)) s += 80;
         if (fn.rfind(L"msm_", 0) == 0 || fn.rfind(L"msz_", 0) == 0) s += 20;
@@ -1274,9 +1680,12 @@ static std::pair<int, int> FindUnitByExt(const std::wstring& unit, const wchar_t
         if (s > bestScore) {
             bestScore = s;
             best = pr;
+            tiedBest = false;
+        } else if (s == bestScore && best != pr) {
+            tiedBest = true;
         }
     }
-    return best;
+    return tiedBest ? std::pair<int, int>{-1, -1} : best;
 }
 
 static void AppendRelatedDetails(std::wstring& text, const std::wstring& unit) {
@@ -1348,12 +1757,36 @@ static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, 
         dxgRef = {arch, fileIndex};
         prefer = StemOf(vfsPath);
         std::wstring vraStem = prefer;
-        if (vraStem.size() >= 4) {
-            const std::wstring pfx = ToLower(vraStem.substr(0, 4));
-            if (pfx == L"msm_") vraStem.replace(0, 3, L"MSZ");
+        const std::wstring pfx = ToLower(vraStem.substr(0, (std::min)(size_t(4), vraStem.size())));
+        if (pfx.rfind(L"_em_", 0) == 0) vraStem.replace(1, 2, L"EZ");
+        else if (pfx == L"msm_") vraStem.replace(0, 3, L"MSZ");
+        else if (pfx == L"bsm_") vraStem.replace(0, 3, L"BSZ");
+        else if (pfx == L"bam_") vraStem.replace(0, 3, L"BAZ");
+        else if (pfx.rfind(L"em_", 0) == 0 || pfx.rfind(L"en_", 0) == 0) vraStem.replace(0, 2, L"EZ");
+        else if (pfx == L"mam_") vraStem.replace(0, 3, L"MAZ");
+        else if (pfx.rfind(L"pm_", 0) == 0) vraStem.replace(0, 2, L"PZ");
+        else if (pfx == L"plm_") vraStem.replace(0, 3, L"PLZ");
+        else if (pfx.rfind(L"um_", 0) == 0) vraStem.replace(0, 2, L"UZ");
+        else if (pfx.rfind(L"om_", 0) == 0) vraStem.replace(0, 2, L"OZ");
+        else if (pfx.rfind(L"fm_", 0) == 0) vraStem.replace(0, 2, L"FZ");
+        else if (pfx.rfind(L"sm_", 0) == 0) vraStem.replace(0, 2, L"SZ");
+        else if (pfx == L"opm_") vraStem.replace(0, 3, L"OPZ");
+        else if (pfx == L"evm_") vraStem.replace(0, 3, L"EVZ");
+        else if (pfx.rfind(L"dm_", 0) == 0) vraStem.replace(0, 2, L"DZ");
+        const auto attrPath = (std::filesystem::path(vfsPath).parent_path().parent_path() /
+                               L"attr" / (vraStem + L".vra")).generic_wstring();
+        vraRef = FindByVfsPath(attrPath, arch);
+        if (vraRef.first < 0) {
+            std::wstring sameStem = prefer;
+            while (!sameStem.empty() && iswspace(sameStem.back())) sameStem.pop_back();
+            if (sameStem != vraStem) {
+                const auto sameNameAttr = (std::filesystem::path(vfsPath).parent_path().parent_path() /
+                                           L"attr" / (sameStem + L".vra")).generic_wstring();
+                vraRef = FindByVfsPath(sameNameAttr, arch);
+            }
         }
-        vraRef = FindUnitByExt(unit, L".vra", vraStem);
-        if (vraRef.first < 0) vraRef = FindUnitByExt(unit, L".vra", L"");
+        if (vraRef.first < 0 && !unit.empty()) vraRef = FindUnitByExt(unit, L".vra", vraStem);
+        if (vraRef.first < 0) vraRef = FindAttrByGeometry(vfsPath, dxgRef, arch);
     } else if (ext == L".vra") {
         vraRef = {arch, fileIndex};
     } else if (ext == L".mrb") {
@@ -1376,8 +1809,17 @@ static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, 
                 vra.Parse((const char*)vraBytes.data(), vraBytes.size());
         }
         if (dxgRef.first < 0 && !vra.geometry.empty())
-            dxgRef = FindByVfsPath(Widen(vra.geometry));
-        if (dxgRef.first < 0 && !unit.empty()) dxgRef = FindUnitByExt(unit, L".dxg", L"");
+            dxgRef = FindByVfsPath(Widen(vra.geometry), vraRef.first >= 0 ? vraRef.first : arch);
+        if (dxgRef.first < 0 && ext == L".vra" && vra.geometry.empty() && !vraPath.empty()) {
+            const std::wstring modelStem = ModelStemFromAttr(StemOf(vraPath));
+            if (!modelStem.empty()) {
+                const auto modelPath = (std::filesystem::path(vraPath).parent_path().parent_path() /
+                                        L"model" / (modelStem + L".dxg")).generic_wstring();
+                dxgRef = FindByVfsPath(modelPath, vraRef.first);
+            }
+        }
+        if (dxgRef.first < 0 && ext == L".mrb" && !unit.empty())
+            dxgRef = FindUnitByExt(unit, L".dxg", L"");
         if (dxgRef.first < 0) {
             text += L"3D: no DXG mesh found for this file.\r\n";
             return false;
@@ -1400,53 +1842,33 @@ static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, 
         std::vector<uint8_t> bytes;
     };
     std::vector<Held> held;
+    std::vector<std::wstring> missingTextures;
+    std::vector<std::pair<std::wstring, std::wstring>> recoveredTextures;
     auto addTex = [&](const std::wstring& texPath) {
-        auto ref = FindByVfsPath(texPath);
-        if (ref.first < 0 && !unit.empty()) {
-            const std::wstring fn = FileNameOf(ToLower(NormVfs(texPath)));
-            auto uit = g_unitIndex.find(unit);
-            if (uit != g_unitIndex.end()) {
-                for (auto pr : uit->second) {
-                    const auto& ar = g_cat.archives[pr.first];
-                    const auto p = VfsPathOf(ar, ar.files[pr.second]);
-                    if (ToLower(FileNameOf(p)) == fn) {
-                        ref = pr;
-                        break;
-                    }
-                }
-            }
-        }
-        if (ref.first < 0) return;
+        std::wstring resolution;
+        const int sourceArchive = vraRef.first >= 0 ? vraRef.first : dxgRef.first;
+        auto ref = FindTextureByVfsPath(texPath, resolution, sourceArchive, Widen(vra.geometry));
+        if (ref.first < 0) return false;
         try {
             const auto& ar = g_cat.archives[ref.first];
             const auto& f = ar.files[(size_t)ref.second];
             Held h;
             h.key = Narrow(texPath);
             h.bytes = fpmf::ExtractFile(ar, f, &g_cat);
-            if (!h.bytes.empty()) held.push_back(std::move(h));
+            if (!h.bytes.empty()) {
+                held.push_back(std::move(h));
+                if (!resolution.empty()) recoveredTextures.emplace_back(texPath, resolution);
+                return true;
+            }
         } catch (...) {
         }
+        return false;
     };
-    for (const auto& m : vra.materials)
-        if (!m.texture.empty()) addTex(Widen(m.texture));
-    if (held.empty() && !unit.empty()) {
-        auto uit = g_unitIndex.find(unit);
-        if (uit != g_unitIndex.end()) {
-            int bestS = -1;
-            std::pair<int, int> best{-1, -1};
-            for (auto pr : uit->second) {
-                const auto& ar = g_cat.archives[pr.first];
-                const auto p = VfsPathOf(ar, ar.files[pr.second]);
-                const int s = PreviewScore(p);
-                if (s > bestS) {
-                    bestS = s;
-                    best = pr;
-                }
-            }
-            if (best.first >= 0 && bestS > 0) {
-                const auto& ar = g_cat.archives[best.first];
-                addTex(VfsPathOf(ar, ar.files[best.second]));
-            }
+    for (const auto& m : vra.materials) {
+        for (const auto* ref : {&m.texture, &m.mixTexture}) {
+            if (ref->empty()) continue;
+            const std::wstring path = Widen(*ref);
+            if (!addTex(path)) missingTextures.push_back(path);
         }
     }
 
@@ -1469,7 +1891,18 @@ static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, 
         return false;
     }
     if (!Preview3D_Load(in)) {
-        text += L"3D: DXG parse/draw failed.\r\n";
+        const bool specialNonMesh = dxgBytes.size() == 96 &&
+            memcmp(dxgBytes.data(), "DXG ", 4) == 0 &&
+            vra.meshes.empty() && vra.materials.empty();
+        if (specialNonMesh) {
+            text += L"3D: the paired VRA has no render mesh or material, so this DXG has no surface to preview through the current static-mesh path; it may still serve another runtime purpose.\r\n";
+            text += L"Mesh: " + dxgPath + L"\r\n";
+            text += L"Attr: " + vraPath + L"\r\n";
+        } else {
+            text += L"3D: DXG parse/draw failed.\r\n";
+            text += L"Mesh: " + dxgPath + L"\r\n";
+            if (!vraPath.empty()) text += L"Attr: " + vraPath + L"\r\n";
+        }
         return false;
     }
 
@@ -1493,6 +1926,23 @@ static bool Load3DPreview(int arch, int fileIndex, const std::wstring& vfsPath, 
     swprintf_s(st, L"Draw: %u meshes  %u tris  %u bones  %u tex\r\n", Preview3D_MeshCount(),
                Preview3D_TriCount(), Preview3D_BoneCount(), (unsigned)held.size());
     text += st;
+    swprintf_s(st, L"Texture decode: %u/%u  mesh use: %u  unresolved material refs: %u\r\n",
+               Preview3D_TextureCount(), (unsigned)held.size(), Preview3D_TexturedMeshCount(),
+               Preview3D_MissingTextureCount());
+    text += st;
+    swprintf_s(st, L"Meshes without VRA material: %u  materials without s_base: %u\r\n",
+               Preview3D_MissingMaterialCount(), Preview3D_NoBaseTextureCount());
+    text += st;
+    if (!vra.materials.empty()) {
+        text += L"VRA base/mix textures: ";
+        text += std::to_wstring(held.size());
+        text += L" loaded, ";
+        text += std::to_wstring(missingTextures.size());
+        text += L" unresolved (no unrelated DDS fallback).\r\n";
+        for (const auto& path : missingTextures) text += L"  missing: " + path + L"\r\n";
+        for (const auto& recovered : recoveredTextures)
+            text += L"  resolved by " + recovered.second + L" basename: " + recovered.first + L"\r\n";
+    }
     swprintf_s(st, L"Rig: %u/%u parts bound to bones (static)\r\n",
                Preview3D_BoundParts(), Preview3D_PartCount());
     text += st;
@@ -1527,12 +1977,14 @@ static int VfsAddChildTo(std::vector<VfsNode>& vfs, int parent, const std::wstri
 static void BuildVfsInto(const fpmf::Catalog& cat, std::vector<VfsNode>& vfs,
                          std::map<std::wstring, std::vector<std::pair<int, int>>>& unitIndex,
                          std::map<std::wstring, std::pair<int, int>>& pathIndex,
+                         std::map<std::wstring, std::vector<std::pair<int, int>>>& pathCandidates,
                          std::map<std::pair<int, int>, std::wstring>& filePaths,
                          HWND hwnd = nullptr, unsigned seq = 0) {
     vfs.clear();
     vfs.push_back({});
     unitIndex.clear();
     pathIndex.clear();
+    pathCandidates.clear();
     filePaths.clear();
     std::map<std::wstring, std::pair<int, int>> owned;
     const unsigned narch = (unsigned)cat.archives.size();
@@ -1556,7 +2008,9 @@ static void BuildVfsInto(const fpmf::Catalog& cat, std::vector<VfsNode>& vfs,
             }
             owned[key] = {ai, fi};
             pathIndex[ToLower(key)] = {ai, fi};
-            filePaths[{ai, fi}] = ToLower(path);
+            const std::wstring normalizedPath = ToLower(NormVfs(path));
+            pathCandidates[normalizedPath].push_back({ai, fi});
+            filePaths[{ai, fi}] = normalizedPath;
             const auto unit = UnitIdFromPath(path);
             if (!unit.empty()) unitIndex[unit].push_back({ai, fi});
         }
@@ -1593,7 +2047,7 @@ static void BuildVfsInto(const fpmf::Catalog& cat, std::vector<VfsNode>& vfs,
 }
 
 static void BuildVfs() {
-    BuildVfsInto(g_cat, g_vfs, g_unitIndex, g_pathIndex, g_filePathLower);
+    BuildVfsInto(g_cat, g_vfs, g_unitIndex, g_pathIndex, g_pathCandidates, g_filePathLower);
     g_vfsSel = 0;
 }
 
@@ -1603,6 +2057,7 @@ struct LoadResult {
     std::vector<VfsNode> vfs;
     std::map<std::wstring, std::vector<std::pair<int, int>>> unitIndex;
     std::map<std::wstring, std::pair<int, int>> pathIndex;
+    std::map<std::wstring, std::vector<std::pair<int, int>>> pathCandidates;
     std::map<std::pair<int, int>, std::wstring> filePaths;
     std::string error;
 };
@@ -1642,6 +2097,7 @@ static void ApplyLoadResult(LoadResult* r) {
     g_vfs = std::move(r->vfs);
     g_unitIndex = std::move(r->unitIndex);
     g_pathIndex = std::move(r->pathIndex);
+    g_pathCandidates = std::move(r->pathCandidates);
     g_filePathLower = std::move(r->filePaths);
     g_vfsSel = 0;
     g_arch = -1;
@@ -1675,7 +2131,8 @@ static void LoadDataThread(std::filesystem::path root, unsigned seq, HWND hwnd) 
         }
         if (seq == g_loadSeq.load()) {
             PostProgress(hwnd, seq, 70, 100, L"Building virtual folder tree...");
-            BuildVfsInto(r->cat, r->vfs, r->unitIndex, r->pathIndex, r->filePaths, hwnd, seq);
+            BuildVfsInto(r->cat, r->vfs, r->unitIndex, r->pathIndex, r->pathCandidates,
+                         r->filePaths, hwnd, seq);
         }
     } catch (const std::exception& ex) {
         r->error = ex.what();

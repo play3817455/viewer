@@ -23,9 +23,10 @@ struct Vertex {
     float x, y, z;
     float nx, ny, nz;
     float u, v;
+    float u1, v1;
 };
 
-constexpr UINT kVertexStride = 32;
+constexpr UINT kVertexStride = 40;
 
 struct Mat4 {
     float m[16]{};
@@ -35,6 +36,7 @@ struct DrawMesh {
     IDirect3DVertexBuffer9* vb = nullptr;
     IDirect3DIndexBuffer9* ib = nullptr;
     IDirect3DTexture9* tex = nullptr;
+    IDirect3DTexture9* mixTex = nullptr;
     unsigned nidx = 0;
     unsigned nverts = 0;
     bool twoSided = false;
@@ -42,6 +44,9 @@ struct DrawMesh {
     bool additive = false;
     bool translucent = false;
     bool sceneStatic = false;
+    float ambient[3] = {0.5f, 0.5f, 0.5f};
+    float diffuse[3] = {1.0f, 1.0f, 1.0f};
+    float emissive[3] = {0.0f, 0.0f, 0.0f};
     std::string name;
     bool weapon = false;
     int bone = -1;    // skeleton bone this part rides on (-1 = static)
@@ -49,7 +54,7 @@ struct DrawMesh {
     float cy = 0.0f;
     float cz = 0.0f;
 
-    // per vertex skinning (sub_B71290 layout: one bone per vertex)
+    // per-vertex skinning from the decoded DXG palette
     std::vector<DxgVec3> basePos;     // bind pose positions
     std::vector<DxgVec3> baseNrm;     // bind pose normals
     std::vector<std::string> shapeBones;  // shape bone palette
@@ -78,7 +83,7 @@ std::vector<IDirect3DTexture9*> g_texOwned;
 IDirect3DVertexBuffer9* g_skelVb = nullptr;
 unsigned g_skelVerts = 0;
 unsigned g_skelBytes = 0;
-DWORD g_fvf = D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX1;
+DWORD g_fvf = D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX2;
 
 // --- interactive control state (WASD move / 1-4 weapon / LMB attack) ---
 bool g_keys[256] = {};
@@ -242,7 +247,7 @@ void UpdateSkeletonVb() {
 }
 
 // Per vertex skinning: rebuild the vertex buffers from the animated bone
-// matrices. A vertex follows exactly one bone (that is what sub_B71290 stores),
+// matrices. A vertex follows one decoded palette bone,
 // so v' = (boneWorld[bone] * inverseBind[bone]) * v. DXG chunk 36 stores the
 // inverse bind matrices, so no separate bind data is needed.
 void UpdateSkinnedMeshes() {
@@ -469,17 +474,20 @@ void LookAt(float ex, float ey, float ez, float cx, float cy, float cz, Mat4& o)
     o.m[14] = -(fx * ex + fy * ey + fz * ez);
 }
 
-std::string Lower(std::string s) {
-    for (auto& c : s)
+std::string NormalizeAssetKey(std::string s) {
+    for (auto& c : s) {
+        if (c == '\\') c = '/';
         if (c >= 'A' && c <= 'Z') c = char(c + 32);
+    }
     return s;
 }
 
-std::string FileName(std::string p) {
-    for (auto& c : p)
-        if (c == '\\') c = '/';
-    const auto sl = p.find_last_of('/');
-    return sl == std::string::npos ? p : p.substr(sl + 1);
+bool IsDecalMeshName(const std::string& name) {
+    std::string lower;
+    lower.reserve(name.size());
+    for (unsigned char c : name)
+        lower.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c));
+    return lower.find("decal") != std::string::npos;
 }
 
 IDirect3DTexture9* CreateTexRgba(const ImageRgba& img) {
@@ -591,6 +599,9 @@ void SetupStates() {
     g_dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
     g_dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
     g_dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+    g_dev->SetTextureStageState(1, D3DTSS_TEXCOORDINDEX, 1);
+    g_dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    g_dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
     D3DLIGHT9 L{};
     L.Type = D3DLIGHT_DIRECTIONAL;
     L.Diffuse.r = L.Diffuse.g = L.Diffuse.b = 0.95f;
@@ -632,13 +643,15 @@ bool CreateDevice() {
     return SUCCEEDED(hr) && g_dev;
 }
 
-bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* mat) {
+bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* mat,
+                IDirect3DTexture9* mixTex = nullptr) {
     if (!g_dev || src.pos.empty() || src.idx.size() < 3) return false;
-    if (src.name.find("decal") != std::string::npos) return false;
+    if (IsDecalMeshName(src.name)) return false;
     DrawMesh d;
     d.nidx = (unsigned)src.idx.size();
     d.nverts = (unsigned)src.pos.size();
     d.tex = tex;
+    d.mixTex = mixTex;
     d.name = src.name;
     {
         float mn[3] = {1.0e9f, 1.0e9f, 1.0e9f};
@@ -668,6 +681,9 @@ bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* m
         d.alphaTest = mat->alphaTest || mat->blend == "translucent";
         d.additive = mat->blend == "add";
         d.translucent = mat->blend == "translucent";
+        memcpy(d.ambient, mat->ambient, sizeof(d.ambient));
+        memcpy(d.diffuse, mat->diffuse, sizeof(d.diffuse));
+        memcpy(d.emissive, mat->emissive, sizeof(d.emissive));
     }
     // keep a bind pose copy so the vertices can be re-skinned every frame
     d.basePos = src.pos;
@@ -699,11 +715,19 @@ bool UploadMesh(const DxgMesh& src, IDirect3DTexture9* tex, const VraMaterial* m
             v->nz = 0;
         }
         if (i < src.uv.size()) {
-            v->u = src.uv[i].u;
-            v->v = src.uv[i].v;
+            // Match the main viewer's VRA UV offset handling. v15 reads these
+            // material fields while constructing the DXG material binding.
+            v->u = src.uv[i].u + (mat ? mat->uvAddU : 0.0f);
+            v->v = src.uv[i].v + (mat ? mat->uvAddV : 0.0f);
         } else {
             v->u = 0;
             v->v = 0;
+        }
+        if (i < src.uv1.size()) {
+            v->u1 = src.uv1[i].u;
+            v->v1 = src.uv1[i].v;
+        } else {
+            v->u1 = v->v1 = 0;
         }
         memset((uint8_t*)v + sizeof(Vertex), 0, kVertexStride - sizeof(Vertex));
     }
@@ -733,7 +757,6 @@ void FitCamera(const DxgModel& model) {
     float mx[3] = {-1.0e9f, -1.0e9f, -1.0e9f};
     bool any = false;
     for (const auto& m : model.meshes) {
-        if (m.lod1) continue;
         for (const auto& p : m.pos) {
             if (p.x < mn[0]) mn[0] = p.x;
             if (p.y < mn[1]) mn[1] = p.y;
@@ -790,17 +813,14 @@ bool Preview3D_Load(const Preview3DInput& in) {
     if (!model.Parse(in.dxg, in.dxgSize)) return false;
 
     VraDoc vra;
-    if (in.vraText && in.vraSize) vra.Parse(in.vraText, in.vraSize);
+    const bool hasVra = in.vraText && in.vraSize && vra.Parse(in.vraText, in.vraSize);
 
     std::map<std::string, IDirect3DTexture9*> byKey;
-    IDirect3DTexture9* fallback = nullptr;
     for (const auto& t : in.textures) {
         auto* tex = LoadTex(t);
         if (!tex) continue;
         g_texOwned.push_back(tex);
-        byKey[Lower(t.key)] = tex;
-        byKey[Lower(FileName(t.key))] = tex;
-        if (!fallback) fallback = tex;
+        byKey[NormalizeAssetKey(t.key)] = tex;
     }
 
     // The decoder now produces real indexed geometry (LOD0 of every part), so all
@@ -808,34 +828,42 @@ bool Preview3D_Load(const Preview3DInput& in) {
     DxgModel draw = model;
     draw.meshes.clear();
     for (const auto& mesh : model.meshes) {
-        if (mesh.lod1) continue;
+        if (hasVra && !vra.HasMesh(mesh.name)) continue;
+        if (vra.IsNoRender(mesh.name)) continue;
+        if (IsDecalMeshName(mesh.name)) continue;
         if (mesh.pos.empty() || mesh.idx.empty()) continue;
         draw.meshes.push_back(mesh);
     }
-    if (draw.meshes.empty()) draw.meshes = model.meshes;
+    if (draw.meshes.empty()) return false;
 
     FitCamera(draw);
     g_meshCount = 0;
     g_triCount = 0;
     for (const auto& mesh : draw.meshes) {
+        if (vra.IsNoRender(mesh.name)) continue;
         const int mid = vra.MaterialOf(mesh.name);
         const VraMaterial* mat = vra.GetMat(mid);
-        IDirect3DTexture9* tex = fallback;
+        IDirect3DTexture9* tex = nullptr;
+        IDirect3DTexture9* mixTex = nullptr;
         if (mat && !mat->texture.empty()) {
-            auto it = byKey.find(Lower(mat->texture));
-            if (it == byKey.end()) it = byKey.find(Lower(FileName(mat->texture)));
+            auto it = byKey.find(NormalizeAssetKey(mat->texture));
             if (it != byKey.end()) tex = it->second;
         }
-        if (UploadMesh(mesh, tex, mat)) ++g_meshCount;
+        if (mat && !mat->mixTexture.empty()) {
+            auto it = byKey.find(NormalizeAssetKey(mat->mixTexture));
+            if (it != byKey.end()) mixTex = it->second;
+        }
+        if (UploadMesh(mesh, tex, mat, mixTex)) ++g_meshCount;
     }
     g_bones = model.bones;
     g_boneCount = (unsigned)g_bones.size();
     for (auto& d : g_draws) {
+        // Static DXG props can contain names such as "gun" or "rifle". The
+        // weapon-name heuristic only applies to parts of a skinned machine.
+        if (g_bones.empty()) d.weapon = false;
         d.vbone.assign(d.basePos.size(), -1);
         bool any = false;
-        // Resolve the shape palette against the skeleton by name, exactly like the
-        // engine does in sub_B72E80 (up to 26 names, each looked up in the skeleton
-        // with an exact string compare).
+        // Resolve the decoded shape palette against skeleton names.
         std::vector<int> pal;   // palette slot -> skeleton bone index (-1 = absent)
         if (!d.shapeBones.empty()) {
             pal.assign(d.shapeBones.size(), -1);
@@ -849,7 +877,7 @@ bool Preview3D_Load(const Preview3DInput& in) {
             }
         }
         // 1) preferred: the file's own per vertex binding (4 bytes per vertex, the
-        //    first byte is the palette slot; see sub_B7ACD0 / sub_B71290).
+        //    first byte is the palette slot in the decoded DXG record).
         if (d.vertBone.size() == d.basePos.size() && !pal.empty()) {
             for (size_t i = 0; i < d.basePos.size(); ++i) {
                 const size_t slot = d.vertBone[i];
@@ -903,17 +931,14 @@ bool Preview3D_AppendStatic(const Preview3DInput& in, const Preview3DTransform& 
     DxgModel model;
     if (!model.Parse(in.dxg, in.dxgSize)) return false;
     VraDoc vra;
-    if (in.vraText && in.vraSize) vra.Parse(in.vraText, in.vraSize);
+    const bool hasVra = in.vraText && in.vraSize && vra.Parse(in.vraText, in.vraSize);
 
     std::map<std::string, IDirect3DTexture9*> byKey;
-    IDirect3DTexture9* fallback = nullptr;
     for (const auto& t : in.textures) {
         auto* tex = LoadTex(t);
         if (!tex) continue;
         g_texOwned.push_back(tex);
-        byKey[Lower(t.key)] = tex;
-        byKey[Lower(FileName(t.key))] = tex;
-        if (!fallback) fallback = tex;
+        byKey[NormalizeAssetKey(t.key)] = tex;
     }
 
     float qx=transform.rotation[0], qy=transform.rotation[1], qz=transform.rotation[2], qw=transform.rotation[3];
@@ -932,7 +957,9 @@ bool Preview3D_AppendStatic(const Preview3DInput& in, const Preview3DTransform& 
 
     unsigned added = 0;
     for (const auto& source : model.meshes) {
-        if (source.lod1 || source.pos.empty() || source.idx.empty()) continue;
+        if (source.pos.empty() || source.idx.empty()) continue;
+        if (hasVra && !vra.HasMesh(source.name)) continue;
+        if (vra.IsNoRender(source.name)) continue;
         DxgMesh mesh = source;
         for (auto& p : mesh.pos) {
             p.x *= transform.scale[0]; p.y *= transform.scale[1]; p.z *= transform.scale[2];
@@ -948,16 +975,21 @@ bool Preview3D_AppendStatic(const Preview3DInput& in, const Preview3DTransform& 
             if (len > 1.0e-6f) { n.x/=len; n.y/=len; n.z/=len; }
         }
         const VraMaterial* mat = vra.GetMat(vra.MaterialOf(source.name));
-        IDirect3DTexture9* tex = fallback;
+        IDirect3DTexture9* tex = nullptr;
+        IDirect3DTexture9* mixTex = nullptr;
         if (mat && !mat->texture.empty()) {
-            auto it=byKey.find(Lower(mat->texture));
-            if(it==byKey.end())it=byKey.find(Lower(FileName(mat->texture)));
+            auto it=byKey.find(NormalizeAssetKey(mat->texture));
             if(it!=byKey.end())tex=it->second;
         }
-        if (UploadMesh(mesh,tex,mat)) {
+        if (mat && !mat->mixTexture.empty()) {
+            auto it=byKey.find(NormalizeAssetKey(mat->mixTexture));
+            if(it!=byKey.end())mixTex=it->second;
+        }
+        if (UploadMesh(mesh,tex,mat,mixTex)) {
             g_draws.back().sceneStatic = !transform.attachToBone;
             g_draws.back().skinned = false;
             g_draws.back().bone = attachBone;
+            if (!transform.attachToBone) g_draws.back().weapon = false;
             ++added;
         }
     }
@@ -1173,6 +1205,32 @@ void Preview3D_Render() {
         g_dev->SetStreamSource(0, d.vb, 0, kVertexStride);
         g_dev->SetIndices(d.ib);
         g_dev->SetTexture(0, d.tex);
+        g_dev->SetTexture(1, d.mixTex);
+        D3DMATERIAL9 material{};
+        material.Ambient.r = d.ambient[0];
+        material.Ambient.g = d.ambient[1];
+        material.Ambient.b = d.ambient[2];
+        material.Ambient.a = 1.0f;
+        material.Diffuse.r = d.diffuse[0];
+        material.Diffuse.g = d.diffuse[1];
+        material.Diffuse.b = d.diffuse[2];
+        material.Diffuse.a = 1.0f;
+        material.Emissive.r = d.emissive[0];
+        material.Emissive.g = d.emissive[1];
+        material.Emissive.b = d.emissive[2];
+        material.Emissive.a = 1.0f;
+        g_dev->SetMaterial(&material);
+        if (d.mixTex) {
+            // Fixed-function approximation of the original s_mix material technique.
+            g_dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_BLENDTEXTUREALPHA);
+            g_dev->SetTextureStageState(1, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            g_dev->SetTextureStageState(1, D3DTSS_COLORARG2, D3DTA_CURRENT);
+            g_dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            g_dev->SetTextureStageState(1, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+        } else {
+            g_dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+            g_dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        }
         g_dev->SetRenderState(D3DRS_CULLMODE, d.twoSided ? D3DCULL_NONE : D3DCULL_CCW);
         if (d.alphaTest) {
             g_dev->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
@@ -1203,6 +1261,7 @@ void Preview3D_Render() {
 
     if (g_showSkel && g_skelVb && g_skelVerts >= 2) {
         g_dev->SetTexture(0, nullptr);
+        g_dev->SetTexture(1, nullptr);
         g_dev->SetRenderState(D3DRS_LIGHTING, FALSE);
         g_dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
         g_dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
@@ -1218,6 +1277,7 @@ void Preview3D_Render() {
         g_dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
         g_dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
         g_dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+        g_dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
         g_dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
     }
 

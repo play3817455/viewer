@@ -8,19 +8,12 @@
 // ---------------------------------------------------------------------------
 // GundamOnline .dxg model decoder.
 //
-// Layout recovered from GundamOnline_unpacked.exe (rhyme engine):
-//   sub_B71290 / sub_B71810  - mesh chunk decoder (rymDX9GMesh)
-//   sub_B7AED0               - mesh block walk      : next   += *(u32*)(p+8) + 28
-//   sub_B7ADC0               - shape walk           : next   += *(u32*)(s+12) + 16
-//   sub_B521F10              - vertex records       : s + 16            (10 B each)
-//   sub_B7ACA0               - face index buffer    : s + 16 + 10*nVerts (6 B per face)
-//   sub_B7ADF0 / B7AE10 / B7AE30 / B7AE50 / B7AE70 / B7AE90
-//                            - position / normal / uv0 / uv1 / extra / weight arrays
-//   sub_B6FB70               - rymDX9GMesh::init (array strides: pos 12B file -> 16B,
-//                              normal 12B, uv 8B, extra 4B, weights 4B)
+// DXG byte layout used by this decoder. Do not treat old non-v15 function names
+// as evidence for the current client; the current v15 IDB confirms the VRA-side
+// geometry/mesh/material relationship in sub_C4E780 and sub_C19320.
 //
-// Chunk (type 1) payload:
-//   +4  u8   shape count (LOD chain: shape 0 = LOD0)
+// Mesh chunk (type 1 or world-field type 0x201) payload:
+//   +4  u8   shape count (geometry slices belonging to this named mesh part)
 //   +8  u32  block size   (next mesh block:  p + size + 28)
 //   +12 u16  nPos
 //   +14 u16  nNrm
@@ -28,7 +21,7 @@
 //   +18 u16  nUv1
 //   +20 u16  nExtra
 //   +24 u32  nWeights (float count)
-//   +28 shape[0]
+//   +28 shape[0..nShapes)
 //        shape header (16 bytes):
 //          +0  u16 nVerts
 //          +2  u16 nFaces
@@ -36,7 +29,8 @@
 //          +12 u32 block size    (next shape: s + size + 16)
 //          +16 vertex records: nVerts * u16[5] = (pos, nrm, uv0, uv1, extra),
 //                              0xFFFF = unused slot
-//          +16 + 10*nVerts : face indices, nFaces * u16[3]
+//          after vertex records: face indices, nFaces * u16[3], then optional
+//          per-vertex bone palette data (extra-data size at shape +8)
 //   after the last shape:
 //        pos[nPos] (float3) | nrm[nNrm] (float3) | uv0[nUv0] (float2)
 //        | uv1[nUv1] (float2) | extra[nExtra] (u32) | weights[nWeights] (float)
@@ -67,12 +61,6 @@ float Rdf(const uint8_t* p) {
 bool Finite3(float x, float y, float z) {
     return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
            fabsf(x) < 1.0e6f && fabsf(y) < 1.0e6f && fabsf(z) < 1.0e6f;
-}
-
-bool LooksLod1(const std::string& name) {
-    if (name.find("_GND_01") != std::string::npos) return true;
-    if (name.find("_LOD1") != std::string::npos || name.find("_lod1") != std::string::npos) return true;
-    return false;
 }
 
 void FaceNormals(DxgMesh& m) {
@@ -111,6 +99,7 @@ void FaceNormals(DxgMesh& m) {
 // Flatten one shape into a renderable mesh (LOD0 only).
 bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint16_t nPos,
                 const uint8_t* nrmArr, uint16_t nNrm, const uint8_t* uvArr, uint16_t nUv,
+                const uint8_t* uv1Arr, uint16_t nUv1,
                 const std::string& name, const std::vector<DxgBone>& skel,
                 DxgMesh& out) {
     if (avail < 28) return false;
@@ -126,10 +115,14 @@ bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint1
     out.name = name;
     out.nVerts = nVerts;
     out.nFaces = nFaces;
-    out.lod1 = LooksLod1(name);
+    // LOD selection is controlled by the paired VRA records. Mesh names such as
+    // *_GND_01 are valid render meshes in some VRA files, so don't infer LOD from
+    // the DXG name.
+    out.lod1 = false;
     out.pos.assign(nVerts, DxgVec3{});
     out.nrm.assign(nVerts, DxgVec3{});
     out.uv.assign(nVerts, DxgVec2{});
+    out.uv1.assign(nVerts, DxgVec2{});
 
     bool anyNrm = false;
     for (uint16_t i = 0; i < nVerts; ++i) {
@@ -137,6 +130,7 @@ bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint1
         const uint16_t ip = Rd16(r);
         const uint16_t in = Rd16(r + 2);
         const uint16_t iu = Rd16(r + 4);
+        const uint16_t iu1 = Rd16(r + 6);
 
         if (ip != kUnused && ip < nPos) {
             const uint8_t* p = posArr + (size_t)ip * 12u;
@@ -155,6 +149,10 @@ bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint1
             const uint8_t* p = uvArr + (size_t)iu * 8u;
             out.uv[i] = DxgVec2{Rdf(p), Rdf(p + 4)};
         }
+        if (iu1 != kUnused && iu1 < nUv1) {
+            const uint8_t* p = uv1Arr + (size_t)iu1 * 8u;
+            out.uv1[i] = DxgVec2{Rdf(p), Rdf(p + 4)};
+        }
     }
 
     out.idx.clear();
@@ -168,15 +166,13 @@ bool BuildShape(const uint8_t* shape, size_t avail, const uint8_t* posArr, uint1
     if (out.idx.empty()) return false;
 
     // ---- skinning data -----------------------------------------------------
-    // Exact layout from the loader (sub_B7ACA0 / sub_B7ACB0 / sub_B7ACD0):
+    // Per-shape rigid bone palette and per-vertex palette slot:
     //   [shape+16 ] vertex records  10 * nVerts
     //   [..       ] index buffer     6 * nFaces
     //   [..       ] u32 paletteSize
     //   [..       ] paletteSize bytes of zero separated bone names (shape palette)
     //   [..       ] 4 bytes per vertex, size at shape+8 (must be nVerts * 4).
-    //               sub_B71290 copies this block into the vertex object and
-    //               sub_B1E510 writes its dword per vertex. Byte 0 of each record
-    //               is the palette slot the vertex is bound to.
+    //               byte 0 of each record is treated as the palette slot.
     out.boneNames.clear();
     out.vertBone.clear();
     const uint8_t nc = shape[4];
@@ -385,48 +381,79 @@ bool DxgModel::Parse(const uint8_t* d, size_t size) {
         const uint32_t csz = Rd32(d + off + 4);
         if (off + 8 + csz > size) break;
         const uint8_t* pl = d + off + 8;
-        if (typ == 1 && csz >= 28) {
+        // World-field DXGs use chunk type 0x201 for the same mesh-block
+        // body that other DXGs store under type 1.  The active scene exporter
+        // already normalizes 0x201 to 1 before using this decoder; accept the
+        // verified equivalent directly so the desktop viewer can preview the
+        // original file and retain its VRA mesh/material names.
+        if ((typ == 1 || typ == 0x201) && csz >= 28) {
             const uint8_t* p = pl;
             const uint8_t* pend = pl + csz;
             while (p + 28 <= pend) {
                 const uint8_t nShapes = p[4];
                 const uint32_t blockSize = Rd32(p + 8);
+                const size_t remaining = (size_t)(pend - p);
+                // Some DXG files end a type-1 chunk with a short auxiliary
+                // record. Do not interpret it as a mesh header or step beyond
+                // the enclosing chunk when its size is not a valid mesh block.
+                if (nShapes == 0 || blockSize == 0 || blockSize > remaining - 28u)
+                    break;
+                const uint8_t* blockEnd = p + 28u + blockSize;
                 const uint16_t nPos = Rd16(p + 12);
                 const uint16_t nNrm = Rd16(p + 14);
                 const uint16_t nUv0 = Rd16(p + 16);
+                const uint16_t nUv1 = Rd16(p + 18);
                 const uint32_t nW = Rd32(p + 24);
 
-                // Walk the shape (LOD) chain; attribute arrays follow the last one.
+                // Walk the shape chain; vertex attribute arrays follow the last shape.
                 const uint8_t* sh = p + 28;
                 std::vector<const uint8_t*> shapes;
+                bool shapeChainValid = true;
                 for (uint32_t si = 0; si < nShapes; ++si) {
-                    if (sh + 16 > pend) break;
-                    shapes.push_back(sh);
+                    if (sh > blockEnd || (size_t)(blockEnd - sh) < 16u) {
+                        shapeChainValid = false;
+                        break;
+                    }
                     const uint32_t sb = Rd32(sh + 12);
+                    if (sb > (size_t)(blockEnd - sh) - 16u) {
+                        shapeChainValid = false;
+                        break;
+                    }
+                    shapes.push_back(sh);
                     sh += (size_t)sb + 16u;
                 }
+                const size_t posBytes = (size_t)nPos * 12u;
+                const size_t nrmBytes = (size_t)nNrm * 12u;
+                const size_t arrayBytes = posBytes + nrmBytes + (size_t)nUv0 * 8u +
+                                          (size_t)Rd16(p + 18) * 8u +
+                                          (size_t)Rd16(p + 20) * 4u + (size_t)nW * 4u;
                 const uint8_t* posArr = sh;
-                const uint8_t* nrmArr = posArr + (size_t)nPos * 12u;
-                const uint8_t* uvArr = nrmArr + (size_t)nNrm * 12u;
-                (void)nUv0;
-                (void)nW;
+                const uint8_t* nrmArr = sh;
+                const uint8_t* uvArr = sh;
+                const uint8_t* uv1Arr = sh;
+                const bool arraysValid = sh <= blockEnd && arrayBytes <= (size_t)(blockEnd - sh);
+                if (arraysValid) {
+                    nrmArr = posArr + posBytes;
+                    uvArr = nrmArr + nrmBytes;
+                    uv1Arr = uvArr + (size_t)nUv0 * 8u;
+                }
 
                 // Every shape is a sub-mesh of the part (e.g. GND_00 keeps the body in
                 // shape 0 and the right leg in shape 1); they are NOT LOD levels.
-                if (!shapes.empty() && posArr <= pend) {
+                if (shapeChainValid && shapes.size() == nShapes && arraysValid) {
                     std::string nm = nameI < names.size() ? names[nameI]
                                                           : ("mesh" + std::to_string(nameI));
                     for (const uint8_t* shape : shapes) {
                         DxgMesh m;
-                        const size_t avail = (size_t)(pend - shape);
+                        const size_t avail = (size_t)(blockEnd - shape);
                         if (BuildShape(shape, avail, posArr, nPos, nrmArr, nNrm, uvArr, nUv0,
+                                       uv1Arr, nUv1,
                                        nm, bones, m))
                             meshes.push_back(std::move(m));
                     }
                 }
                 ++nameI;
-                if (blockSize == 0) break;
-                p += (size_t)blockSize + 28u;
+                p = blockEnd;
             }
         } else if (typ == 36) {
             ParseSkeleton(pl, csz, bones);
